@@ -1,0 +1,105 @@
+# GeoPulse
+
+GeoPulse is a learning project: we build a small real-time vehicle-location
+system, measure its limits, and then improve it one phase at a time.
+
+## Phase 1: the baseline
+
+**Goal:** make simulated vehicles send GPS pings to a web API, save each ping
+straight into PostgreSQL, and measure how the simple design behaves.
+
+The API writes each request to the database before replying. This is easy to
+understand, but it means every vehicle request waits for a database write.
+Later, Phase 2 will add Kafka as a buffer. For now, the direct write gives us a
+baseline to compare against.
+
+### What is in this phase
+
+- `app/main.py` — the FastAPI service and its database reads/writes.
+- `app/models.py` — validation for each incoming GPS ping.
+- `simulator/vehicle_simulator.py` — sends one ping per vehicle per second.
+- `tests/` — checks the input rules without needing a running database.
+
+The simulator currently generates sample coordinates inside a small New York
+area. It does not follow actual roads yet; OpenStreetMap road routes can come
+later.
+
+## Set up on Windows
+
+This phase uses Python 3.11+ and a local PostgreSQL server. Docker is not
+required.
+
+1. In pgAdmin, connect to your local PostgreSQL server and open the Query Tool.
+   Create a project-specific login and database. Replace the sample password
+   with one you choose locally, and do not share it. Run the statements
+   separately: PostgreSQL does not allow `CREATE DATABASE` inside a transaction.
+
+   ```sql
+   CREATE ROLE geopulse WITH LOGIN PASSWORD 'choose-a-local-password';
+   ```
+
+   After that succeeds, run:
+
+   ```sql
+   CREATE DATABASE geopulse OWNER geopulse;
+   ```
+
+2. In PowerShell, from the project folder, make a virtual environment and
+   install the packages:
+
+   ```powershell
+   py -3.11 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r requirements.txt
+   ```
+
+3. Copy `.env.example` to `.env`. Edit `.env` and replace the example password
+   in `DATABASE_URL` with the password you chose. Keep `.env` private; Git
+   ignores it.
+
+4. Start the API:
+
+   ```powershell
+   python -m uvicorn app.main:app --reload
+   ```
+
+   The first start creates the `pings` table and its vehicle/time index. Open
+   <http://127.0.0.1:8000/docs> to try the API, or
+   <http://127.0.0.1:8000/health> to check that the database is reachable.
+
+5. In a second PowerShell window, activate the same virtual environment and run
+   a small load test:
+
+   ```powershell
+   .\.venv\Scripts\Activate.ps1
+   python -m simulator.vehicle_simulator --vehicles 100 --duration 10
+   ```
+
+   The simulator prints how many pings were expected, how many were saved, and
+   the measured throughput. Check the total stored count at
+   <http://127.0.0.1:8000/api/v1/pings/count>.
+
+   Increase the load gradually, for example to 250 and then 500 vehicles. Stop
+   if your computer becomes unresponsive. Compare runs using the same duration;
+   this is a learning benchmark, not a claim about production capacity.
+
+6. Run the tests:
+
+   ```powershell
+   python -m pytest
+   ```
+
+## The seven phases
+
+1. **Baseline:** send pings directly to the database and find the first
+   bottleneck.
+2. **Kafka:** buffer pings in a durable queue so ingestion does not wait for
+   database writes.
+3. **Live statistics:** process the stream into up-to-date area-level numbers.
+4. **Sharding:** spread historical pings across database servers.
+5. **Kubernetes:** run, restart, and scale services from a declarative setup.
+6. **Reliability:** add monitoring and controlled failure tests.
+7. **Batch analytics:** analyze the full history with Spark.
+
+Each phase will build on measured results from the previous one; we will not
+start every infrastructure tool at once.
