@@ -89,6 +89,29 @@ required.
    python -m pytest
    ```
 
+### Baseline results (November 11, 2026)
+
+These are observed results from one local Windows computer with Python 3.11 and
+PostgreSQL 17. Each run completed with zero failed pings.
+
+| Vehicles | Duration setting | Pings saved | Elapsed | Measured throughput |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 3 s | 30 | 3.00 s | 10.0 pings/s |
+| 100 | 10 s | 1,000 | 10.01 s | 99.9 pings/s |
+| 250 | 10 s | 2,500 | 10.01 s | 249.8 pings/s |
+| 500 | 10 s | 5,000 | 11.50 s | 434.6 pings/s |
+| 500 (repeat) | 10 s | 5,000 | 12.10 s | 413.1 pings/s |
+| 750 | 10 s | 7,500 | 16.66 s | 450.3 pings/s |
+
+The simulator calculates throughput as successful pings divided by the entire
+run time. Larger runs took longer than their requested duration, and measured
+throughput rose only slightly from 500 to 750 vehicles. This suggests the
+overall local test is approaching a limit, but does **not** identify whether
+the simulator, HTTP requests, API, or database is the limiting component. The
+simulator currently uses at most 64 concurrent request workers, so its
+capacity is part of the measurement too. Repeatable latency and component
+monitoring are needed before attributing the bottleneck.
+
 ## The seven phases
 
 1. **Baseline:** send pings directly to the database and find the first
