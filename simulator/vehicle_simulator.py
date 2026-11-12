@@ -1,6 +1,8 @@
 import argparse
 import json
+import math
 import random
+import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +21,7 @@ def make_ping(vehicle_number: int) -> dict[str, str | float]:
     }
 
 
-def send_ping(api_url: str, vehicle_number: int) -> None:
+def send_ping(api_url: str, vehicle_number: int) -> float:
     payload = json.dumps(make_ping(vehicle_number)).encode("utf-8")
     request = Request(
         api_url,
@@ -27,9 +29,22 @@ def send_ping(api_url: str, vehicle_number: int) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    started_at = time.perf_counter()
     with urlopen(request, timeout=10) as response:
         if response.status != 201:
             raise RuntimeError(f"API returned unexpected status {response.status}")
+        response.read()
+    return (time.perf_counter() - started_at) * 1000
+
+
+def latency_percentile(latencies: list[float], percentile: float) -> float:
+    if not latencies:
+        raise ValueError("latencies must contain at least one measurement")
+    if not 0 <= percentile <= 100:
+        raise ValueError("percentile must be between 0 and 100")
+    ordered_latencies = sorted(latencies)
+    index = max(0, math.ceil(percentile / 100 * len(ordered_latencies)) - 1)
+    return ordered_latencies[index]
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +68,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     successes = 0
+    latencies: list[float] = []
     failures: list[str] = []
     started_at = time.perf_counter()
 
@@ -65,7 +81,7 @@ def main() -> int:
             ]
             for future in futures:
                 try:
-                    future.result()
+                    latencies.append(future.result())
                     successes += 1
                 except (HTTPError, URLError, TimeoutError, RuntimeError) as error:
                     if len(failures) < 3:
@@ -80,6 +96,16 @@ def main() -> int:
     print(f"Failed pings:  {args.vehicles * args.duration - successes}")
     print(f"Elapsed:       {elapsed:.2f} seconds")
     print(f"Throughput:    {successes / elapsed:.1f} pings/second")
+    if latencies:
+        median_latency = statistics.median(latencies)
+        p95_latency = latency_percentile(latencies, 95)
+        print(
+            "Latency:       "
+            f"median {median_latency:.1f} ms, "
+            f"p95 {p95_latency:.1f} ms (successful requests)"
+        )
+    else:
+        print("Latency:       unavailable (no successful requests)")
     for failure in failures:
         print(f"Example failure: {failure}", file=sys.stderr)
     return 1 if failures else 0

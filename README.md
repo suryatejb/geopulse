@@ -75,8 +75,11 @@ required.
    python -m simulator.vehicle_simulator --vehicles 100 --duration 10
    ```
 
-   The simulator prints how many pings were expected, how many were saved, and
-   the measured throughput. Check the total stored count at
+   The simulator prints how many pings were expected, how many were saved,
+   throughput, and median and 95th-percentile latency for successful requests.
+   Latency is measured from just before the HTTP request until its response body
+   is read. The 95th percentile is the nearest-rank value: 95% of successful
+   requests took that long or less. Check the total stored count at
    <http://127.0.0.1:8000/api/v1/pings/count>.
 
    Increase the load gradually, for example to 250 and then 500 vehicles. Stop
@@ -102,6 +105,27 @@ PostgreSQL 17. Each run completed with zero failed pings.
 | 500 | 10 s | 5,000 | 11.50 s | 434.6 pings/s |
 | 500 (repeat) | 10 s | 5,000 | 12.10 s | 413.1 pings/s |
 | 750 | 10 s | 7,500 | 16.66 s | 450.3 pings/s |
+
+These earlier runs were made before the simulator recorded request latency, so
+their median and p95 latency are not available.
+
+### Latency-enabled repeat runs
+
+The simulator was updated to record successful HTTP request latency. These
+single local runs used the same Windows computer and PostgreSQL setup:
+
+| Vehicles | Pings saved | Elapsed | Throughput | Median latency | p95 latency |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 5,000 | 12.47 s | 400.8 pings/s | 140.5 ms | 250.2 ms |
+| 750 | 7,500 | 16.73 s | 448.2 pings/s | 138.4 ms | 163.9 ms |
+
+Both runs had zero failed requests, and the database count increased by exactly
+12,500 across the two runs. Latency starts when a worker begins the HTTP request
+and ends after it reads the response body. It does not include time waiting in
+the simulator's thread-pool queue before a worker starts the request. These are
+single runs, and the 750-vehicle latencies were lower than the 500-vehicle
+latencies; repeat runs are needed before drawing conclusions about a trend or
+identifying a bottleneck.
 
 The simulator calculates throughput as successful pings divided by the entire
 run time. Larger runs took longer than their requested duration, and measured
