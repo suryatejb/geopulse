@@ -75,12 +75,23 @@ required.
    python -m simulator.vehicle_simulator --vehicles 100 --duration 10
    ```
 
-   The simulator prints how many pings were expected, how many were saved,
-   throughput, and median and 95th-percentile latency for successful requests.
-   Latency is measured from just before the HTTP request until its response body
-   is read. The simulator reuses HTTP connections between pings. The 95th
-   percentile is the nearest-rank value: 95% of successful requests took that
-   long or less. Check the total stored count at
+   The simulator prints expected and saved ping counts, throughput, and median
+   and 95th-percentile timings for successful requests. It measures:
+
+   - **Client latency:** the HTTP request and response, excluding time waiting
+     for a simulator worker.
+   - **Simulator worker queue:** time waiting for a worker to start the request.
+   - **API time:** time spent handling the request inside FastAPI.
+   - **DB connection-pool wait:** time waiting to acquire a PostgreSQL
+     connection.
+   - **DB execute:** time for the insert query and returned row.
+   - **DB transaction:** time from acquiring the connection through finishing
+     the transaction and returning the connection to the pool.
+
+   The API reports its timings using the standard `Server-Timing` response
+   header, which the simulator reads. The 95th percentile is the nearest-rank
+   value: 95% of successful requests took that long or less. The simulator
+   reuses HTTP connections between pings. Check the total stored count at
    <http://127.0.0.1:8000/api/v1/pings/count>.
 
    Increase the load gradually, for example to 250 and then 500 vehicles. Stop
@@ -154,6 +165,26 @@ increased by exactly the 12,493 successful requests. These results vary
 substantially between runs. They show that the current setup can experience
 slow responses and connection failures at this load, but do not by themselves
 identify whether the simulator, API, or database is the cause.
+
+### Component timing diagnosis (November 13, 2026)
+
+The API now reports `Server-Timing` measurements, and the simulator reports
+time spent waiting for one of its request workers. These fresh 10-second runs
+had zero failed requests:
+
+| Vehicles | Saved | Throughput | Client median / p95 | Worker queue median / p95 | API median / p95 | DB pool wait median / p95 | DB execute median / p95 | DB transaction median / p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 5,000 | 477.3/s | 91.8 / 215.4 ms | 383.0 / 883.7 ms | 2.0 / 56.8 ms | 0.0 / 0.0 ms | 0.3 / 2.0 ms | 0.6 / 2.8 ms |
+| 750 | 7,500 | 512.4/s | 98.8 / 229.2 ms | 595.9 / 1,424.5 ms | 2.2 / 68.9 ms | 0.0 / 0.0 ms | 0.4 / 2.4 ms | 0.7 / 3.4 ms |
+
+Pool-wait values are rounded to one decimal place. The database timings are
+small in these runs, while the simulator worker queue is much larger and grows
+at 750 vehicles. This points to the simulator's 64-worker load-generation limit
+as a major factor in these measurements; it does not support blaming PostgreSQL
+for the earlier slow runs. The API remained healthy, and the database count
+increased from 12,485 to 24,985, exactly matching the 12,500 successful pings.
+This is one fresh run at each load, so intermittent connection resets from
+earlier tests are not explained or ruled out.
 
 The simulator calculates throughput as successful pings divided by the entire
 run time. In the original baseline tests, larger runs took longer than their

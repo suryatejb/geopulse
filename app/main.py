@@ -1,9 +1,10 @@
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -63,6 +64,18 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.middleware("http")
+    async def add_api_timing(request: Request, call_next):
+        started_at = time.perf_counter()
+        response = await call_next(request)
+        api_ms = (time.perf_counter() - started_at) * 1000
+        server_timing = response.headers.get("Server-Timing")
+        api_timing = f"api;dur={api_ms:.3f}"
+        response.headers["Server-Timing"] = (
+            f"{server_timing}, {api_timing}" if server_timing else api_timing
+        )
+        return response
+
     @app.get("/health")
     def health(request: Request) -> dict[str, str]:
         with request.app.state.pool.connection() as connection:
@@ -74,8 +87,12 @@ def create_app() -> FastAPI:
         response_model=PingResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_ping(ping: PingCreate, request: Request) -> dict:
+    def create_ping(ping: PingCreate, request: Request, response: Response) -> dict:
+        pool_wait_started_at = time.perf_counter()
         with request.app.state.pool.connection() as connection:
+            connection_acquired_at = time.perf_counter()
+            db_pool_ms = (connection_acquired_at - pool_wait_started_at) * 1000
+            db_execute_started_at = time.perf_counter()
             row = connection.execute(
                 """
                 INSERT INTO pings (
@@ -93,11 +110,18 @@ def create_app() -> FastAPI:
                     ping.recorded_at,
                 ),
             ).fetchone()
+            db_execute_ms = (time.perf_counter() - db_execute_started_at) * 1000
+        db_transaction_ms = (time.perf_counter() - connection_acquired_at) * 1000
         if row is None:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="The database did not return the saved ping.",
             )
+        response.headers["Server-Timing"] = (
+            f"db_pool;dur={db_pool_ms:.3f}, "
+            f"db_execute;dur={db_execute_ms:.3f}, "
+            f"db_transaction;dur={db_transaction_ms:.3f}"
+        )
         return row
 
     @app.get("/api/v1/pings/count", response_model=PingCount)

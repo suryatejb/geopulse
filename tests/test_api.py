@@ -72,6 +72,11 @@ def test_ping_api_saves_valid_request_and_reports_count() -> None:
             assert response.status_code == 201
             assert response.json()["id"] == 1
             assert response.json()["vehicle_id"] == "vehicle-00001"
+            server_timing = response.headers["Server-Timing"]
+            assert "db_pool;dur=" in server_timing
+            assert "db_execute;dur=" in server_timing
+            assert "db_transaction;dur=" in server_timing
+            assert "api;dur=" in server_timing
 
             count_response = await client.get("/api/v1/pings/count")
             assert count_response.status_code == 200
