@@ -1,5 +1,4 @@
 import argparse
-import json
 import math
 import random
 import statistics
@@ -7,8 +6,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx
 
 
 def make_ping(vehicle_number: int) -> dict[str, str | float]:
@@ -21,19 +20,11 @@ def make_ping(vehicle_number: int) -> dict[str, str | float]:
     }
 
 
-def send_ping(api_url: str, vehicle_number: int) -> float:
-    payload = json.dumps(make_ping(vehicle_number)).encode("utf-8")
-    request = Request(
-        api_url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def send_ping(client: httpx.Client, api_url: str, vehicle_number: int) -> float:
     started_at = time.perf_counter()
-    with urlopen(request, timeout=10) as response:
-        if response.status != 201:
-            raise RuntimeError(f"API returned unexpected status {response.status}")
-        response.read()
+    response = client.post(api_url, json=make_ping(vehicle_number))
+    if response.status_code != 201:
+        raise RuntimeError(f"API returned unexpected status {response.status_code}")
     return (time.perf_counter() - started_at) * 1000
 
 
@@ -72,23 +63,25 @@ def main() -> int:
     failures: list[str] = []
     started_at = time.perf_counter()
 
-    with ThreadPoolExecutor(max_workers=min(args.vehicles, 64)) as executor:
-        for _ in range(args.duration):
-            tick_started_at = time.perf_counter()
-            futures = [
-                executor.submit(send_ping, args.api_url, vehicle_number)
-                for vehicle_number in range(args.vehicles)
-            ]
-            for future in futures:
-                try:
-                    latencies.append(future.result())
-                    successes += 1
-                except (HTTPError, URLError, TimeoutError, RuntimeError) as error:
-                    if len(failures) < 3:
-                        failures.append(str(error))
-            remaining_tick_time = 1 - (time.perf_counter() - tick_started_at)
-            if remaining_tick_time > 0:
-                time.sleep(remaining_tick_time)
+    limits = httpx.Limits(max_connections=64, max_keepalive_connections=64)
+    with httpx.Client(timeout=10, limits=limits) as client:
+        with ThreadPoolExecutor(max_workers=min(args.vehicles, 64)) as executor:
+            for _ in range(args.duration):
+                tick_started_at = time.perf_counter()
+                futures = [
+                    executor.submit(send_ping, client, args.api_url, vehicle_number)
+                    for vehicle_number in range(args.vehicles)
+                ]
+                for future in futures:
+                    try:
+                        latencies.append(future.result())
+                        successes += 1
+                    except (httpx.RequestError, RuntimeError) as error:
+                        if len(failures) < 3:
+                            failures.append(str(error))
+                remaining_tick_time = 1 - (time.perf_counter() - tick_started_at)
+                if remaining_tick_time > 0:
+                    time.sleep(remaining_tick_time)
 
     elapsed = time.perf_counter() - started_at
     print(f"Expected pings: {args.vehicles * args.duration}")

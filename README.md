@@ -78,8 +78,9 @@ required.
    The simulator prints how many pings were expected, how many were saved,
    throughput, and median and 95th-percentile latency for successful requests.
    Latency is measured from just before the HTTP request until its response body
-   is read. The 95th percentile is the nearest-rank value: 95% of successful
-   requests took that long or less. Check the total stored count at
+   is read. The simulator reuses HTTP connections between pings. The 95th
+   percentile is the nearest-rank value: 95% of successful requests took that
+   long or less. Check the total stored count at
    <http://127.0.0.1:8000/api/v1/pings/count>.
 
    Increase the load gradually, for example to 250 and then 500 vehicles. Stop
@@ -122,19 +123,45 @@ single local runs used the same Windows computer and PostgreSQL setup:
 Both runs had zero failed requests, and the database count increased by exactly
 12,500 across the two runs. Latency starts when a worker begins the HTTP request
 and ends after it reads the response body. It does not include time waiting in
-the simulator's thread-pool queue before a worker starts the request. These are
-single runs, and the 750-vehicle latencies were lower than the 500-vehicle
-latencies; repeat runs are needed before drawing conclusions about a trend or
-identifying a bottleneck.
+the simulator's thread-pool queue before a worker starts the request. The
+simulator now reuses HTTP connections; earlier latency results above were
+collected before connection reuse was added and are not directly comparable.
+Those initial latency measurements were single runs; their lower 750-vehicle
+latency did not establish a trend. Updated repeat tests follow.
+
+### Connection-reusing repeat tests (November 12, 2026)
+
+The simulator now reuses HTTP connections. Across three 10-second runs at each
+load:
+
+| Vehicles | Run 1 saved | Run 2 saved | Run 3 saved | Failed requests |
+| ---: | ---: | ---: | ---: | ---: |
+| 500 | 5,000 | 5,000 | 5,000 | 0 total |
+| 750 | 7,499 | 7,500 | 7,500 | 1 total |
+
+The 750-vehicle run with one failure reported a connection reset. The database
+count matched the successful-ping totals across these runs.
+
+One additional run at each load gave these latency measurements:
+
+| Vehicles | Pings saved | Elapsed | Throughput | Median latency | p95 latency |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 5,000 | 10.37 s | 482.1 pings/s | 107.8 ms | 212.0 ms |
+| 750 | 7,493 | 60.54 s | 123.8 pings/s | 373.6 ms | 1,209.7 ms |
+
+The additional 750-vehicle run had 7 failed requests; the database count
+increased by exactly the 12,493 successful requests. These results vary
+substantially between runs. They show that the current setup can experience
+slow responses and connection failures at this load, but do not by themselves
+identify whether the simulator, API, or database is the cause.
 
 The simulator calculates throughput as successful pings divided by the entire
-run time. Larger runs took longer than their requested duration, and measured
-throughput rose only slightly from 500 to 750 vehicles. This suggests the
-overall local test is approaching a limit, but does **not** identify whether
-the simulator, HTTP requests, API, or database is the limiting component. The
-simulator currently uses at most 64 concurrent request workers, so its
-capacity is part of the measurement too. Repeatable latency and component
-monitoring are needed before attributing the bottleneck.
+run time. In the original baseline tests, larger runs took longer than their
+requested duration, and measured throughput rose only slightly from 500 to
+750 vehicles. The connection-reusing repeats above also varied substantially.
+These results do **not** identify whether the simulator, HTTP requests, API, or
+database is the limiting component. The simulator currently uses at most 64
+concurrent request workers, so its capacity is part of the measurement too.
 
 ## The seven phases
 

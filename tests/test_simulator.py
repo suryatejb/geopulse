@@ -29,25 +29,18 @@ def test_latency_percentile_rejects_out_of_range_percentile() -> None:
         latency_percentile([10], 101)
 
 
-def test_send_ping_returns_request_latency(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_send_ping_returns_request_latency() -> None:
     class FakeResponse:
-        status = 201
+        status_code = 201
 
-        def __enter__(self) -> "FakeResponse":
-            return self
+    class FakeClient:
+        def post(self, url: str, json: dict[str, str | float]) -> FakeResponse:
+            assert url == "http://example.test/pings"
+            assert json["vehicle_id"] == "vehicle-00001"
+            return FakeResponse()
 
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b'{"id": 1}'
-
-    monkeypatch.setattr(
-        vehicle_simulator,
-        "urlopen",
-        lambda *args, **kwargs: FakeResponse(),
+    latency = vehicle_simulator.send_ping(
+        FakeClient(), "http://example.test/pings", 1
     )
-
-    latency = vehicle_simulator.send_ping("http://example.test/pings", 1)
 
     assert latency >= 0
