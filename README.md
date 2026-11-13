@@ -75,6 +75,16 @@ required.
    python -m simulator.vehicle_simulator --vehicles 100 --duration 10
    ```
 
+   The simulator defaults to 64 concurrent request workers. You can change
+   that limit for controlled comparisons, for example:
+
+   ```powershell
+   python -m simulator.vehicle_simulator --vehicles 750 --duration 10 --workers 96
+   python -m simulator.vehicle_simulator --vehicles 750 --duration 10 --workers 128
+   ```
+
+   The actual worker count is the smaller of `--vehicles` and `--workers`.
+
    The simulator prints expected and saved ping counts, throughput, and median
    and 95th-percentile timings for successful requests. It measures:
 
@@ -186,13 +196,35 @@ increased from 12,485 to 24,985, exactly matching the 12,500 successful pings.
 This is one fresh run at each load, so intermittent connection resets from
 earlier tests are not explained or ruled out.
 
+### Simulator worker-count comparison (November 13, 2026)
+
+The same vehicle loads were tested with 96 and 128 simulator request workers.
+The earlier 64-worker measurements are included as a comparison:
+
+| Workers | Vehicles | Saved | Failed | Elapsed | Throughput | Worker queue p95 | API p95 | DB pool wait p95 | DB transaction p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 500 | 5,000 | 0 | ~10.5 s | 477.3/s | 883.7 ms | 56.8 ms | 0.0 ms | 2.8 ms |
+| 64 | 750 | 7,500 | 0 | ~14.6 s | 512.4/s | 1,424.5 ms | 68.9 ms | 0.0 ms | 3.4 ms |
+| 96 | 500 | 4,994 | 6 | 41.74 s | 119.6/s | 4,786.6 ms | 330.3 ms | 0.1 ms | 8.6 ms |
+| 96 | 750 | 7,474 | 26 | 67.86 s | 110.1/s | 6,422.2 ms | 472.5 ms | 0.1 ms | 15.2 ms |
+| 128 | 500 | 4,983 | 17 | 59.28 s | 84.1/s | 5,069.4 ms | 386.2 ms | 0.1 ms | 11.8 ms |
+| 128 | 750 | 7,492 | 8 | 73.40 s | 102.1/s | 6,225.6 ms | 539.1 ms | 0.1 ms | 16.2 ms |
+
+Increasing simulator workers made throughput worse and added request failures.
+Meanwhile, database pool wait stayed at or below 0.1 ms, and the 95th-percentile
+database transaction stayed at or below 16.2 ms. API time and simulator queue
+time rose sharply. This points to API or local-machine overload rather than a
+database bottleneck in these tests. The API stayed healthy and logged no
+server-side errors; the client observed failed requests. The database row count
+increased from 29,974 to 54,917, matching the 24,943 successful responses.
+
 The simulator calculates throughput as successful pings divided by the entire
-run time. In the original baseline tests, larger runs took longer than their
-requested duration, and measured throughput rose only slightly from 500 to
-750 vehicles. The connection-reusing repeats above also varied substantially.
-These results do **not** identify whether the simulator, HTTP requests, API, or
-database is the limiting component. The simulator currently uses at most 64
-concurrent request workers, so its capacity is part of the measurement too.
+run time. Taken together, these measurements do not indicate that PostgreSQL
+is the bottleneck: its connection wait and transaction times remain low. Higher
+simulator concurrency instead coincides with longer simulator queues, slower
+API handling, and request failures. We still have not isolated the exact API
+or local-machine resource involved, nor explained the earlier intermittent
+connection resets. These local results are not a production capacity claim.
 
 ## The seven phases
 

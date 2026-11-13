@@ -33,6 +33,33 @@ def test_parse_server_timing_returns_empty_for_missing_header() -> None:
     assert vehicle_simulator.parse_server_timing(None) == {}
 
 
+def test_parse_args_accepts_custom_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        vehicle_simulator.sys,
+        "argv",
+        ["vehicle_simulator", "--workers", "96"],
+    )
+
+    assert vehicle_simulator.parse_args().workers == 96
+
+
+@pytest.mark.parametrize("worker_count", [0, -1])
+def test_parse_args_rejects_non_positive_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_count: int,
+) -> None:
+    monkeypatch.setattr(
+        vehicle_simulator.sys,
+        "argv",
+        ["vehicle_simulator", "--workers", str(worker_count)],
+    )
+
+    with pytest.raises(SystemExit):
+        vehicle_simulator.parse_args()
+
+
 def test_latency_percentile_uses_nearest_rank() -> None:
     assert latency_percentile([40, 10, 30, 20], 95) == 40
     assert latency_percentile([40, 10, 30, 20], 50) == 20

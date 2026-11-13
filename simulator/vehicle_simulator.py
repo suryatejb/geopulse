@@ -99,6 +99,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vehicles", type=int, default=100)
     parser.add_argument("--duration", type=int, default=10, help="Run time in seconds")
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=64,
+        help="Maximum concurrent simulator requests",
+    )
+    parser.add_argument(
         "--api-url",
         default="http://127.0.0.1:8000/api/v1/pings",
     )
@@ -107,18 +113,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("--vehicles must be at least 1")
     if args.duration < 1:
         parser.error("--duration must be at least 1")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
     return args
 
 
 def main() -> int:
     args = parse_args()
+    worker_count = min(args.vehicles, args.workers)
     timings: list[RequestTiming] = []
     failures: list[str] = []
     started_at = time.perf_counter()
 
-    limits = httpx.Limits(max_connections=64, max_keepalive_connections=64)
+    limits = httpx.Limits(
+        max_connections=worker_count,
+        max_keepalive_connections=worker_count,
+    )
     with httpx.Client(timeout=10, limits=limits) as client:
-        with ThreadPoolExecutor(max_workers=min(args.vehicles, 64)) as executor:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
             for _ in range(args.duration):
                 tick_started_at = time.perf_counter()
                 futures = []
@@ -148,6 +160,7 @@ def main() -> int:
     print(f"Expected pings: {args.vehicles * args.duration}")
     print(f"Saved pings:   {successes}")
     print(f"Failed pings:  {args.vehicles * args.duration - successes}")
+    print(f"Request workers: {worker_count}")
     print(f"Elapsed:       {elapsed:.2f} seconds")
     print(f"Throughput:    {successes / elapsed:.1f} pings/second")
     print_timing_summary("Client latency", [timing.client_ms for timing in timings])
