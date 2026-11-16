@@ -3,6 +3,99 @@
 GeoPulse is a learning project: we build a small real-time vehicle-location
 system, measure its limits, and then improve it one phase at a time.
 
+## Phase 0: the Kubernetes playground
+
+The project plan starts with a local three-node Kubernetes cluster and
+monitoring. The cluster uses kind: each Kubernetes node runs inside a Docker
+container. One node is the control plane, which manages the cluster; two are
+workers, which run applications.
+
+On Windows, install and start Docker Desktop with the WSL 2 backend, and install
+kind, kubectl, and Helm. From the project folder in PowerShell, create the
+cluster using a project-specific kubeconfig rather than changing your default
+Kubernetes context:
+
+```powershell
+New-Item -ItemType Directory -Force .geopulse | Out-Null
+kind create cluster --name geopulse --config .\infra\kind\cluster.yaml --kubeconfig .\.geopulse\kubeconfig --wait 120s
+$env:KUBECONFIG = (Resolve-Path .\.geopulse\kubeconfig).Path
+kubectl get nodes
+```
+
+Set `KUBECONFIG` again when opening a new PowerShell window. The `.geopulse`
+folder is ignored by Git because the kubeconfig contains cluster credentials.
+The existing Phase 1 API and database still run locally; moving them into
+Kubernetes is a separate step.
+
+### Prometheus and Grafana
+
+The local monitoring stack uses the `kube-prometheus-stack` Helm chart version
+`93.3.0` and the settings in `infra/monitoring/values.yaml`. Prometheus collects
+metrics, node exporters provide CPU and memory measurements for each node,
+and Grafana displays them. Alertmanager is disabled for this resource-conscious
+local setup; full alerting is part of Phase 6. Metrics use one-day retention
+and are not configured for persistent storage.
+
+To install or recreate monitoring, first set `KUBECONFIG` as above, then
+run the following from the project folder. This creates a random Grafana
+password only if the secret does not already exist. The password is sent to
+Kubernetes over standard input, not put in a command-line argument.
+
+```powershell
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+if ($LASTEXITCODE -ne 0) { throw 'Failed to create monitoring namespace.' }
+$existing = kubectl -n monitoring get secret geopulse-grafana-admin --ignore-not-found -o name
+if ($LASTEXITCODE -ne 0) { throw 'Failed to check Grafana secret.' }
+if (-not $existing) {
+    $bytes = New-Object byte[] 24
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $password = [Convert]::ToBase64String($bytes)
+    $secret = @{
+        apiVersion = 'v1'
+        kind = 'Secret'
+        metadata = @{ name = 'geopulse-grafana-admin'; namespace = 'monitoring' }
+        type = 'Opaque'
+        data = @{
+            'admin-user' = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('admin'))
+            'admin-password' = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($password))
+        }
+    } | ConvertTo-Json -Depth 5 -Compress
+    $secret | kubectl apply -f -
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to create Grafana secret.' }
+    Remove-Variable bytes, password, secret
+}
+
+$helmRoot = Join-Path (Resolve-Path .\.geopulse).Path 'helm'
+$env:HELM_REPOSITORY_CONFIG = Join-Path $helmRoot 'repositories.yaml'
+$env:HELM_REPOSITORY_CACHE = Join-Path $helmRoot 'repository-cache'
+New-Item -ItemType Directory -Force $env:HELM_REPOSITORY_CACHE | Out-Null
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
+if ($LASTEXITCODE -ne 0) { throw 'Failed to add Prometheus Helm repository.' }
+helm repo update prometheus-community
+if ($LASTEXITCODE -ne 0) { throw 'Failed to update Prometheus Helm repository.' }
+helm upgrade --install geopulse-monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --version 93.3.0 -f .\infra\monitoring\values.yaml --wait --timeout 12m
+if ($LASTEXITCODE -ne 0) { throw 'Failed to install monitoring.' }
+```
+
+To open Grafana, run the following in a PowerShell window and leave it open:
+
+```powershell
+kubectl -n monitoring port-forward service/geopulse-monitoring-grafana 3000:80
+```
+
+Open <http://127.0.0.1:3000>. The username is `admin`. To see the password on
+your own computer, use another PowerShell window with `KUBECONFIG` set:
+
+```powershell
+$secret = kubectl -n monitoring get secret geopulse-grafana-admin -o json | ConvertFrom-Json
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($secret.data.'admin-password'))
+```
+
+Keep the password private. In Grafana, open **Dashboards** and search for
+**Kubernetes / Compute Resources / Nodes Overview** or **Node Exporter / Nodes**
+to see node CPU and memory. Stop port forwarding with Ctrl+C when finished.
+
 ## Phase 1: the baseline
 
 **Goal:** make simulated vehicles send GPS pings to a web API, save each ping
@@ -218,6 +311,59 @@ database bottleneck in these tests. The API stayed healthy and logged no
 server-side errors; the client observed failed requests. The database row count
 increased from 29,974 to 54,917, matching the 24,943 successful responses.
 
+### Connection-reuse investigation (November 15, 2026)
+
+A temporary tracer assigned each ping a unique ID and recorded when the API
+received it. In a 96-worker, 500-vehicle, 10-round run, 28 requests failed with
+Windows connection errors. None of those 28 IDs appeared at the application
+entry point or in PostgreSQL. This narrows the observed failures to before the
+application received them, but does not identify which component closed the
+connections. Tracing adds overhead and may change timings.
+
+An additional comparison alternated two connection settings. Each run used 96
+workers, 500 vehicles, and five rounds (2,500 pings):
+
+| Mode | Saved | Failed | Elapsed | Throughput | Distinct client address/port pairs seen by API |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Reuse | 2,493 | 7 | 8.47 s | 294.4/s | 161 |
+| New connection per ping | 2,500 | 0 | 5.81 s | 430.4/s | 2,499 |
+| Reuse | 2,500 | 0 | 8.56 s | 292.1/s | 167 |
+| New connection per ping | 2,500 | 0 | 6.87 s | 364.0/s | 2,500 |
+
+The seven failed IDs were not seen by the application or found in PostgreSQL;
+the database count increase matched successful responses in each run. These
+results make connection reuse a lead worth investigating, not proof of a root
+cause: the second reuse run had no failures, and these are only two runs per
+mode. Address/port pairs are not a precise count of TCP connections because
+ports can be reused. Opening a new connection per ping can exhaust local
+ports, so it is not established as a safe production fix. The comparison used
+temporary tracing scripts rather than changing the project's simulator.
+
+#### Client idle-expiry comparison
+
+The same traced setup was run six times, alternating HTTPX's default 5-second
+idle-connection expiry with a 1-second expiry. Uvicorn's idle timeout remained
+5 seconds; each run used 96 workers, 500 vehicles, and five rounds.
+
+| Client expiry | Saved | Failed | Elapsed | Throughput | Distinct client address/port pairs seen by API |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 s | 2,500 | 0 | 8.55 s | 292.6/s | 166 |
+| 1 s | 2,500 | 0 | 7.07 s | 353.8/s | 345 |
+| 5 s | 2,500 | 0 | 8.55 s | 292.4/s | 184 |
+| 1 s | 2,500 | 0 | 7.06 s | 354.2/s | 354 |
+| 5 s | 2,494 | 6 | 8.45 s | 295.2/s | 177 |
+| 1 s | 2,500 | 0 | 7.03 s | 355.6/s | 339 |
+
+The six failed requests were connection read errors; their IDs were not seen
+at the application entry point or in PostgreSQL. Database count increases
+matched the successful-response counts. The shorter expiry had no failures in
+these three runs, but it used more observed address/port pairs; the sample is
+too small to establish that it fixes the intermittent resets. Pair counts are
+not exact connection counts because ports may be reused. Server-observed
+response-to-next-request gaps are only a proxy for connection idleness and
+cannot measure the idle age of the failed requests. The experiment used
+temporary tracing scripts and did not change the simulator's default expiry.
+
 The simulator calculates throughput as successful pings divided by the entire
 run time. Taken together, these measurements do not indicate that PostgreSQL
 is the bottleneck: its connection wait and transaction times remain low. Higher
@@ -226,17 +372,16 @@ API handling, and request failures. We still have not isolated the exact API
 or local-machine resource involved, nor explained the earlier intermittent
 connection resets. These local results are not a production capacity claim.
 
-## The seven phases
+## The eight phases
 
-1. **Baseline:** send pings directly to the database and find the first
-   bottleneck.
-2. **Kafka:** buffer pings in a durable queue so ingestion does not wait for
-   database writes.
-3. **Live statistics:** process the stream into up-to-date area-level numbers.
-4. **Sharding:** spread historical pings across database servers.
-5. **Kubernetes:** run, restart, and scale services from a declarative setup.
-6. **Reliability:** add monitoring and controlled failure tests.
-7. **Batch analytics:** analyze the full history with Spark.
+0. **Setup:** create the Kubernetes playground and basic monitoring.
+1. **Baseline:** send pings directly to the database and measure performance.
+2. **Kafka:** buffer pings durably and save them using separate workers.
+3. **Live statistics:** use Spark Streaming for area-level numbers.
+4. **Sharding:** distribute historical pings by vehicle across database servers.
+5. **Autoscaling:** scale workers based on Kafka backlog with KEDA.
+6. **Reliability:** add alerts, tracing, and controlled failure tests.
+7. **Batch analytics:** archive pings and analyze their full history with Spark.
 
 Each phase will build on measured results from the previous one; we will not
 start every infrastructure tool at once.
