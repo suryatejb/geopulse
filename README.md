@@ -98,6 +98,45 @@ to see node CPU and memory. Stop port forwarding with Ctrl+C when finished.
 
 ## Phase 1: the baseline
 
+The Phase 1 API and its PostgreSQL database can run inside the Phase 0 cluster.
+The deployment uses a single PostgreSQL StatefulSet with a 2 GiB local-path
+volume and a single API pod. The image is built on your computer and loaded
+directly into kind; it is not published to a registry. A setup script creates
+random database credentials in a Kubernetes Secret and never prints them.
+
+From the project folder in PowerShell, with Docker Desktop running and at least
+2 GiB of free host memory, deploy the baseline:
+
+```powershell
+.\infra\kubernetes\phase1\deploy.ps1
+```
+
+The script builds `geopulse-api:0.1.0`, loads it into the `geopulse` kind
+cluster, creates the database and API resources, and waits for both to become
+ready. It leaves the database in the cluster; it does not change your local
+PostgreSQL installation or database.
+
+To try the API, open one PowerShell window and forward the service:
+
+```powershell
+$env:KUBECONFIG = (Resolve-Path .\.geopulse\kubeconfig).Path
+kubectl -n geopulse port-forward service/geopulse-api 8000:8000
+```
+
+In another PowerShell window, from the project folder, send a small test run:
+
+```powershell
+.\.venv\Scripts\python.exe -m simulator.vehicle_simulator --vehicles 10 --duration 3 --workers 10
+```
+
+Check <http://127.0.0.1:8000/health> and
+<http://127.0.0.1:8000/api/v1/pings/count>. Confirm the returned count increased
+by the number of saved pings. To stop the forward, press Ctrl+C in its window.
+
+The database volume uses kind's local-path storage. It survives a PostgreSQL pod
+restart, but deleting the cluster can delete the data. This is a learning setup,
+not a backup or production database.
+
 **Goal:** make simulated vehicles send GPS pings to a web API, save each ping
 straight into PostgreSQL, and measure how the simple design behaves.
 

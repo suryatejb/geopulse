@@ -1,0 +1,10 @@
+.git
+.geopulse
+.venv
+.env
+.pytest_cache
+__pycache__
+*.py[cod]
+tests
+simulator
+README.md
