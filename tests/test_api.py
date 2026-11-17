@@ -82,6 +82,10 @@ def test_ping_api_saves_valid_request_and_reports_count() -> None:
             assert count_response.status_code == 200
             assert count_response.json() == {"count": 1}
 
+            livez_response = await client.get("/livez")
+            assert livez_response.status_code == 200
+            assert livez_response.json() == {"status": "ok"}
+
             invalid_response = await client.post(
                 "/api/v1/pings",
                 json={

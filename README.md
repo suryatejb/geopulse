@@ -133,7 +133,7 @@ From the project folder in PowerShell, with Docker Desktop running and at least
 .\infra\kubernetes\phase1\deploy.ps1
 ```
 
-The script builds `geopulse-api:0.1.0`, loads it into the `geopulse` kind
+The script builds `geopulse-api:0.1.1`, loads it into the `geopulse` kind
 cluster, creates the database and API resources, and waits for both to become
 ready. It leaves the database in the cluster; it does not change your local
 PostgreSQL installation or database.
@@ -158,6 +158,60 @@ by the number of saved pings. To stop the forward, press Ctrl+C in its window.
 The database volume uses kind's local-path storage. It survives a PostgreSQL pod
 restart, but deleting the cluster can delete the data. This is a learning setup,
 not a backup or production database.
+
+## Phase 1 baseline: where it breaks (in Kubernetes)
+
+The earlier laptop benchmarks were limited by the simulator and Windows
+networking, not by the system. To get a fair number, the load now comes from
+[k6](https://k6.io) running as a Job inside the cluster, so the traffic never
+touches Windows networking:
+
+```powershell
+.\infra\loadtest\run.ps1 -Rates 500,750,1000 -DurationSeconds 30
+```
+
+Each rate runs for 30 seconds against the single API pod and single PostgreSQL
+pod. "Stored" is the number of rows added to the database. API/DB cores are the
+CPU cores the pod used on average during the run.
+
+| Target pings/s | Achieved/s | Failed | Median latency | p95 latency | API cores | DB cores |
+|---:|---:|---:|---:|---:|---:|---:|
+| 250 | 250 | 0% | 2.2 ms | 5.3 ms | 0.33 | – |
+| 500 | 500 | 0% | 2.4 ms | 33 ms | 0.67 | 0.14 |
+| 600 | 502 | 0% | 1,460 ms | 3,929 ms | 1.14 | 0.15 |
+| 700 | 410 | 10.9% | 3,258 ms | 10,000 ms (timeout) | 1.00 | 0.12 |
+| 750 | 431 | 13.5% | 3,204 ms | 10,000 ms (timeout) | 1.01 | 0.13 |
+| 1,000 | 464 | 25.6% | 2,707 ms | 10,000 ms (timeout) | – | 0.13 |
+| 2,000 | 525 | 31.5% | 2,209 ms | 10,000 ms (timeout) | – | 0.12 |
+| 3,000 | 475 | 31.9% | 2,144 ms | 10,000 ms (timeout) | – | 0.11 |
+
+(The 250 pings/s row is from an earlier run of the same test, taken before
+database CPU was measured. "–" means the reading was unreliable because the API
+restarted during the run.)
+
+**The baseline: this design breaks at about 500 pings per second.** At 500 it is
+fast and loses nothing. At 600 it can no longer keep up: requests queue and
+latency jumps from milliseconds to seconds. Above 700, requests time out and
+Kubernetes restarts the API.
+
+What the measurements show:
+
+- **The API process is the bottleneck, not the database.** The API uses about one
+  full CPU core (a single Python process) while PostgreSQL uses only about 0.13
+  of a core. This differs from the plan's expectation that the database would
+  fail first.
+- **The API cannot answer even health checks when overloaded.** Kubernetes
+  restarted it during the heavy runs because it did not reply to `/livez` within
+  3 seconds. The cheap `/livez` check was added for this reason; `/health`
+  checks the database too and is used for startup.
+- **A timed-out ping may still be saved.** At 750 pings/s about 1,760 pings that
+  the client treated as failed were in the database. If the client retried, the
+  database would hold duplicates. This is the problem the plan's sequence numbers
+  and Phase 4 de-duplication solve.
+
+Limits of this test: the load generator runs on the same laptop and the same
+cluster as the system under test, and both share about 6.8 GiB of memory. Each
+rate was measured once.
 
 ## Phase 2: Kafka (in progress)
 

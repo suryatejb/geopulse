@@ -1,8 +1,12 @@
+param(
+    [double]$MinimumFreeGiB = 2
+)
+
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $kubeconfig = Join-Path $repoRoot '.geopulse\kubeconfig'
-$image = 'geopulse-api:0.1.0'
+$image = 'geopulse-api:0.1.1'
 $namespace = 'geopulse'
 
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -63,7 +67,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $availableMemoryGiB = $os.FreePhysicalMemory / 1MB
-if ($availableMemoryGiB -lt 2) {
+if ($availableMemoryGiB -lt $MinimumFreeGiB) {
     $memoryMessage = ("Only {0:N2} GiB of host memory is available; close other applications " +
         "before adding the API and database to the cluster.") -f $availableMemoryGiB
     throw $memoryMessage

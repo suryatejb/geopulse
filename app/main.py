@@ -76,6 +76,10 @@ def create_app() -> FastAPI:
         )
         return response
 
+    @app.get("/livez")
+    async def livez() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.get("/health")
     def health(request: Request) -> dict[str, str]:
         with request.app.state.pool.connection() as connection:
