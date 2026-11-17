@@ -96,6 +96,28 @@ Keep the password private. In Grafana, open **Dashboards** and search for
 **Kubernetes / Compute Resources / Nodes Overview** or **Node Exporter / Nodes**
 to see node CPU and memory. Stop port forwarding with Ctrl+C when finished.
 
+### Running with limited memory
+
+Prometheus and Grafana can be stopped while you work on other parts, then
+started again. Their saved configuration is kept:
+
+```powershell
+.\infra\monitoring\toggle.ps1 -State off
+.\infra\monitoring\toggle.ps1 -State on
+```
+
+Docker Desktop's Linux VM keeps memory it has used until it restarts. To cap
+it, create `%USERPROFILE%\.wslconfig` containing:
+
+```ini
+[wsl2]
+memory=7GB
+swap=2GB
+```
+
+Then run `wsl --shutdown` and start Docker Desktop again. Quit Docker Desktop
+when you are not working on the project to return its memory to Windows.
+
 ## Phase 1: the baseline
 
 The Phase 1 API and its PostgreSQL database can run inside the Phase 0 cluster.
