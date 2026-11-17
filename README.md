@@ -159,6 +159,45 @@ The database volume uses kind's local-path storage. It survives a PostgreSQL pod
 restart, but deleting the cluster can delete the data. This is a learning setup,
 not a backup or production database.
 
+## Phase 2: Kafka (in progress)
+
+Kafka is a durable waiting line for messages. The plan's design has the API
+hand each ping to Kafka instead of writing straight to the database. This step
+installs Kafka; the API and database writer are not connected to it yet.
+
+[Strimzi](https://strimzi.io) is a Kubernetes operator: a program that creates
+and looks after Kafka for us. Install it and the cluster from the project
+folder:
+
+```powershell
+$env:KUBECONFIG = (Resolve-Path .\.geopulse\kubeconfig).Path
+$helmRoot = Join-Path (Resolve-Path .\.geopulse).Path 'helm'
+$env:HELM_REPOSITORY_CONFIG = Join-Path $helmRoot 'repositories.yaml'
+$env:HELM_REPOSITORY_CACHE = Join-Path $helmRoot 'repository-cache'
+helm repo add strimzi https://strimzi.io/charts/ --force-update
+kubectl create namespace kafka
+helm upgrade --install strimzi strimzi/strimzi-kafka-operator --namespace kafka --version 1.3.1 -f .\infra\kafka\strimzi-values.yaml --wait --timeout 6m
+kubectl apply -f .\infra\kafka\cluster.yaml
+kubectl -n kafka wait kafka/geopulse --for=condition=Ready --timeout=600s
+kubectl apply -f .\infra\kafka\topics.yaml
+```
+
+What gets created:
+
+- `cluster.yaml` — three Kafka servers (brokers), each with 2 GiB of storage, a
+  512 MiB Java heap and a 768 MiB memory limit. Every message is copied to all
+  three, and a write counts as saved only when at least two have it
+  (`min.insync.replicas: 2`).
+- `topics.yaml` — `pings` (6 partitions, so one vehicle's pings stay in order
+  while different vehicles are handled in parallel) and `pings-dlq`, the
+  dead-letter topic for broken pings.
+
+Limit of this laptop setup: kind has only two worker nodes, so two of the three
+brokers share a node. A real cluster would put each on its own machine.
+
+Check it with `kubectl -n kafka get kafka,kafkatopic,pods`. Kafka needs about
+2.5 GiB of extra memory; turn monitoring off first if memory is tight.
+
 **Goal:** make simulated vehicles send GPS pings to a web API, save each ping
 straight into PostgreSQL, and measure how the simple design behaves.
 

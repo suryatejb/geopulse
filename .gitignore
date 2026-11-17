@@ -3,4 +3,5 @@
 .geopulse/
 __pycache__/
 .pytest_cache/
+GeoPulse_Project_Plan.*
 *.py[cod]

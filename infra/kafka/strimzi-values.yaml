@@ -1,0 +1,9 @@
+watchNamespaces:
+  - kafka
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 384Mi
