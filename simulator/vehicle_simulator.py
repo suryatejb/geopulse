@@ -1,12 +1,15 @@
 import argparse
 import math
 import random
+import sqlite3
 import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -16,14 +19,43 @@ class RequestTiming:
     client_ms: float
     worker_queue_ms: float
     api_ms: float | None
+    kafka_send_ms: float | None
     db_pool_ms: float | None
     db_execute_ms: float | None
     db_transaction_ms: float | None
 
 
-def make_ping(vehicle_number: int) -> dict[str, str | float]:
+def open_sequence_store(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    with connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS sequences "
+            "(vehicle_number INTEGER PRIMARY KEY, sequence_number INTEGER NOT NULL)"
+        )
+    return connection
+
+
+def allocate_sequences(connection: sqlite3.Connection, vehicles: int) -> list[int]:
+    with connection:
+        connection.executemany(
+            "INSERT INTO sequences (vehicle_number, sequence_number) VALUES (?, 1) "
+            "ON CONFLICT(vehicle_number) DO UPDATE "
+            "SET sequence_number = sequence_number + 1",
+            ((number,) for number in range(vehicles)),
+        )
+        rows = connection.execute(
+            "SELECT sequence_number FROM sequences "
+            "WHERE vehicle_number < ? ORDER BY vehicle_number",
+            (vehicles,),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def make_ping(vehicle_number: int, sequence_number: int) -> dict[str, int | str | float]:
     return {
         "vehicle_id": f"vehicle-{vehicle_number:05d}",
+        "sequence_number": sequence_number,
         "latitude": round(random.uniform(40.700, 40.800), 6),
         "longitude": round(random.uniform(-74.020, -73.900), 6),
         "speed_kmh": round(random.uniform(0, 80), 1),
@@ -50,11 +82,12 @@ def send_ping(
     client: httpx.Client,
     api_url: str,
     vehicle_number: int,
+    sequence_number: int,
     submitted_at: float,
 ) -> RequestTiming:
     started_at = time.perf_counter()
-    response = client.post(api_url, json=make_ping(vehicle_number))
-    if response.status_code != 201:
+    response = client.post(api_url, json=make_ping(vehicle_number, sequence_number))
+    if response.status_code not in {201, 202}:
         raise RuntimeError(f"API returned unexpected status {response.status_code}")
     request_ended_at = time.perf_counter()
     server_timings = parse_server_timing(response.headers.get("Server-Timing"))
@@ -62,6 +95,7 @@ def send_ping(
         client_ms=(request_ended_at - started_at) * 1000,
         worker_queue_ms=(started_at - submitted_at) * 1000,
         api_ms=server_timings.get("api"),
+        kafka_send_ms=server_timings.get("kafka_send"),
         db_pool_ms=server_timings.get("db_pool"),
         db_execute_ms=server_timings.get("db_execute"),
         db_transaction_ms=server_timings.get("db_transaction"),
@@ -129,12 +163,16 @@ def main() -> int:
         max_connections=worker_count,
         max_keepalive_connections=worker_count,
     )
-    with httpx.Client(timeout=10, limits=limits) as client:
+    sequence_path = Path(__file__).resolve().parent.parent / ".geopulse" / "simulator-sequences.sqlite3"
+    with closing(open_sequence_store(sequence_path)) as store, httpx.Client(
+        timeout=10, limits=limits
+    ) as client:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             for _ in range(args.duration):
                 tick_started_at = time.perf_counter()
                 futures = []
-                for vehicle_number in range(args.vehicles):
+                sequences = allocate_sequences(store, args.vehicles)
+                for vehicle_number, sequence_number in enumerate(sequences):
                     submitted_at = time.perf_counter()
                     futures.append(
                         executor.submit(
@@ -142,6 +180,7 @@ def main() -> int:
                             client,
                             args.api_url,
                             vehicle_number,
+                            sequence_number,
                             submitted_at,
                         )
                     )
@@ -158,17 +197,18 @@ def main() -> int:
     elapsed = time.perf_counter() - started_at
     successes = len(timings)
     print(f"Expected pings: {args.vehicles * args.duration}")
-    print(f"Saved pings:   {successes}")
+    print(f"Accepted pings: {successes}")
     print(f"Failed pings:  {args.vehicles * args.duration - successes}")
     print(f"Request workers: {worker_count}")
     print(f"Elapsed:       {elapsed:.2f} seconds")
-    print(f"Throughput:    {successes / elapsed:.1f} pings/second")
+    print(f"Throughput:    {successes / elapsed:.1f} accepted pings/second")
     print_timing_summary("Client latency", [timing.client_ms for timing in timings])
     print_timing_summary(
         "Simulator worker queue",
         [timing.worker_queue_ms for timing in timings],
     )
     print_timing_summary("API time", [timing.api_ms for timing in timings])
+    print_timing_summary("Kafka publish", [timing.kafka_send_ms for timing in timings])
     print_timing_summary("DB connection-pool wait", [timing.db_pool_ms for timing in timings])
     print_timing_summary("DB execute", [timing.db_execute_ms for timing in timings])
     print_timing_summary(

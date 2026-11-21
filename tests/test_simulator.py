@@ -1,4 +1,7 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from pathlib import Path
 
 import httpx
 import pytest
@@ -8,23 +11,45 @@ from simulator.vehicle_simulator import latency_percentile, make_ping
 
 
 def test_simulator_generates_a_location_for_the_requested_vehicle() -> None:
-    ping = make_ping(7)
+    ping = make_ping(7, 3)
 
     assert ping["vehicle_id"] == "vehicle-00007"
+    assert ping["sequence_number"] == 3
     assert 40.700 <= ping["latitude"] <= 40.800
     assert -74.020 <= ping["longitude"] <= -73.900
     assert 0 <= ping["speed_kmh"] <= 80
     assert isinstance(ping["recorded_at"], str)
 
 
+def test_sequence_numbers_persist_and_remain_unique_across_runs(tmp_path: Path) -> None:
+    path = tmp_path / "sequences.sqlite3"
+    with closing(vehicle_simulator.open_sequence_store(path)) as store:
+        assert vehicle_simulator.allocate_sequences(store, 2) == [1, 1]
+        assert vehicle_simulator.allocate_sequences(store, 1) == [2]
+    with closing(vehicle_simulator.open_sequence_store(path)) as store:
+        assert vehicle_simulator.allocate_sequences(store, 3) == [3, 2, 1]
+
+
+def test_concurrent_sequence_allocations_do_not_reuse_numbers(tmp_path: Path) -> None:
+    path = tmp_path / "sequences.sqlite3"
+
+    def allocate() -> list[int]:
+        with closing(vehicle_simulator.open_sequence_store(path)) as store:
+            return vehicle_simulator.allocate_sequences(store, 2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: allocate(), range(2)))
+
+    assert sorted(results) == [[1, 1], [2, 2]]
+
+
 def test_parse_server_timing_reads_known_measurements() -> None:
     timings = vehicle_simulator.parse_server_timing(
-        "db_pool;dur=1.250, db_execute;dur=2.500, api;dur=4.000"
+        "kafka_send;dur=2.500, api;dur=4.000"
     )
 
     assert timings == {
-        "db_pool": 1.25,
-        "db_execute": 2.5,
+        "kafka_send": 2.5,
         "api": 4.0,
     }
 
@@ -79,11 +104,12 @@ def test_send_ping_returns_request_latency() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == "http://example.test/pings"
         return httpx.Response(
-            201,
+            202,
             headers={
                 "Server-Timing": (
-                    "db_pool;dur=1.250, db_execute;dur=2.500, "
-                    "db_transaction;dur=3.000, api;dur=4.000"
+                    "kafka_send;dur=2.500, api;dur=4.000, "
+                    "db_pool;dur=1.000, db_execute;dur=1.500, "
+                    "db_transaction;dur=2.000"
                 )
             },
             request=request,
@@ -94,12 +120,14 @@ def test_send_ping_returns_request_latency() -> None:
             client,
             "http://example.test/pings",
             1,
+            1,
             time.perf_counter() - 0.001,
         )
 
     assert latency.client_ms >= 0
     assert latency.worker_queue_ms >= 0
     assert latency.api_ms == 4.0
-    assert latency.db_pool_ms == 1.25
-    assert latency.db_execute_ms == 2.5
-    assert latency.db_transaction_ms == 3.0
+    assert latency.kafka_send_ms == 2.5
+    assert latency.db_pool_ms == 1.0
+    assert latency.db_execute_ms == 1.5
+    assert latency.db_transaction_ms == 2.0

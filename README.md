@@ -118,23 +118,23 @@ swap=2GB
 Then run `wsl --shutdown` and start Docker Desktop again. Quit Docker Desktop
 when you are not working on the project to return its memory to Windows.
 
-## Phase 1: the baseline
+## Running the API in Kubernetes
 
-The Phase 1 API and its PostgreSQL database can run inside the Phase 0 cluster.
 The deployment uses a single PostgreSQL StatefulSet with a 2 GiB local-path
-volume and a single API pod. The image is built on your computer and loaded
-directly into kind; it is not published to a registry. A setup script creates
-random database credentials in a Kubernetes Secret and never prints them.
+volume and a single API pod. By default the API writes directly to PostgreSQL.
+The image is built on your computer and loaded directly into kind, not published
+to a registry. A setup script creates random database credentials in a
+Kubernetes Secret and never prints them.
 
 From the project folder in PowerShell, with Docker Desktop running and at least
-2 GiB of free host memory, deploy the baseline:
+2 GiB of free host memory, deploy the API and database:
 
 ```powershell
 .\infra\kubernetes\phase1\deploy.ps1
 ```
 
-The script builds `geopulse-api:0.1.1`, loads it into the `geopulse` kind
-cluster, creates the database and API resources, and waits for both to become
+The script builds `geopulse-api:0.2.0`, loads it into the `geopulse` kind
+cluster, creates the database and API resources, and waits for them to become
 ready. It leaves the database in the cluster; it does not change your local
 PostgreSQL installation or database.
 
@@ -151,9 +151,17 @@ In another PowerShell window, from the project folder, send a small test run:
 .\.venv\Scripts\python.exe -m simulator.vehicle_simulator --vehicles 10 --duration 3 --workers 10
 ```
 
-Check <http://127.0.0.1:8000/health> and
-<http://127.0.0.1:8000/api/v1/pings/count>. Confirm the returned count increased
-by the number of saved pings. To stop the forward, press Ctrl+C in its window.
+The simulator assigns each vehicle an increasing sequence number and keeps
+the counters in `.geopulse/simulator-sequences.sqlite3` across runs. Keep this
+file: deleting it resets the counters. Each run commits numbers before sending,
+so a crash or failed request can leave gaps; the simulator does not retry failed
+pings. Concurrent simulators sharing the file allocate distinct numbers, but
+can send them out of order. Simulators on separate machines need separately
+assigned vehicle IDs or shared coordination.
+
+In the default PostgreSQL mode, check <http://127.0.0.1:8000/health> and
+<http://127.0.0.1:8000/api/v1/pings/count>; the count should rise by the
+number of accepted pings. To stop the forward, press Ctrl+C in its window.
 
 The database volume uses kind's local-path storage. It survives a PostgreSQL pod
 restart, but deleting the cluster can delete the data. This is a learning setup,
@@ -171,8 +179,11 @@ touches Windows networking:
 ```
 
 Each rate runs for 30 seconds against the single API pod and single PostgreSQL
-pod. "Stored" is the number of rows added to the database. API/DB cores are the
-CPU cores the pod used on average during the run.
+pod. "Accepted" is the number of pings acknowledged by the API (either stored
+in PostgreSQL in baseline mode or acknowledged by Kafka in Kafka mode).
+"Stored" is the number of rows added to the database; it will remain zero in
+Kafka mode until the Phase 2 writer is added. API/DB cores are the CPU cores
+the pod used on average during the run.
 
 | Target pings/s | Achieved/s | Failed | Median latency | p95 latency | API cores | DB cores |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -215,9 +226,15 @@ rate was measured once.
 
 ## Phase 2: Kafka (in progress)
 
-Kafka is a durable waiting line for messages. The plan's design has the API
-hand each ping to Kafka instead of writing straight to the database. This step
-installs Kafka; the API and database writer are not connected to it yet.
+Kafka is a waiting line for messages. The API can publish each ping to Kafka
+instead of writing it straight to the database. The API uses the vehicle ID as
+the Kafka key, so a vehicle's pings go to the same partition. Kafka preserves
+the order in which it receives messages; it does not sort sequence numbers.
+Concurrent requests, timeouts, retries, or multiple producers can still put
+them out of order. Each ping carries a sequence number, and the API returns
+success only after Kafka acknowledges it. The separate database writer is not
+connected yet. A sequence number is required in Kafka mode; PostgreSQL mode
+still accepts older clients that do not send one.
 
 [Strimzi](https://strimzi.io) is a Kubernetes operator: a program that creates
 and looks after Kafka for us. Install it and the cluster from the project
@@ -242,8 +259,8 @@ What gets created:
   512 MiB Java heap and a 768 MiB memory limit. Every message is copied to all
   three, and a write counts as saved only when at least two have it
   (`min.insync.replicas: 2`).
-- `topics.yaml` — `pings` (6 partitions, so one vehicle's pings stay in order
-  while different vehicles are handled in parallel) and `pings-dlq`, the
+- `topics.yaml` — `pings` (6 partitions, each preserving its arrival order
+  while different vehicles can be handled in parallel) and `pings-dlq`, the
   dead-letter topic for broken pings.
 
 Limit of this laptop setup: kind has only two worker nodes, so two of the three
@@ -252,13 +269,32 @@ brokers share a node. A real cluster would put each on its own machine.
 Check it with `kubectl -n kafka get kafka,kafkatopic,pods`. Kafka needs about
 2.5 GiB of extra memory; turn monitoring off first if memory is tight.
 
-**Goal:** make simulated vehicles send GPS pings to a web API, save each ping
-straight into PostgreSQL, and measure how the simple design behaves.
+PostgreSQL is the default in both Kubernetes and `.env.example`. To opt in to
+the experimental Kafka path after installing Kafka, run:
 
-The API writes each request to the database before replying. This is easy to
-understand, but it means every vehicle request waits for a database write.
-Later, Phase 2 will add Kafka as a buffer. For now, the direct write gives us a
-baseline to compare against.
+```powershell
+.\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka
+```
+
+In this mode, the API returns HTTP 202 after Kafka acknowledges the ping, but
+the database count does not increase. **Do not use it for data you need to
+keep:** there is no writer yet, and Kafka may delete pings after its one-day
+retention period. Run the deployment script without `-IngestionMode kafka` to
+restore the PostgreSQL baseline.
+
+The API waits up to five seconds for Kafka. A timeout returns HTTP 503 with an
+unknown outcome: the ping may still be written after the response. Retrying
+could create a duplicate; producer idempotence only handles Kafka's internal
+retries, not a new HTTP request. The project does not yet guarantee no loss,
+deduplication, or sequence ordering during failures.
+
+**Next:** add the separate writer that consumes pings from Kafka and saves them
+to PostgreSQL, routing messages it cannot process to `pings-dlq`.
+
+In PostgreSQL mode, the API writes each request to the database before
+replying. This is easy to understand, but it means every vehicle request waits
+for a database write. This direct-write mode remains available as a baseline
+against the Kafka path.
 
 ### What is in this phase
 
@@ -332,13 +368,17 @@ required.
 
    The actual worker count is the smaller of `--vehicles` and `--workers`.
 
-   The simulator prints expected and saved ping counts, throughput, and median
-   and 95th-percentile timings for successful requests. It measures:
+   The simulator prints expected and accepted ping counts, throughput, and
+   median and 95th-percentile timings for successful requests. In PostgreSQL
+   mode, accepted means saved; in Kafka mode, it means acknowledged by Kafka.
+   It measures:
 
    - **Client latency:** the HTTP request and response, excluding time waiting
      for a simulator worker.
    - **Simulator worker queue:** time waiting for a worker to start the request.
    - **API time:** time spent handling the request inside FastAPI.
+   - **Kafka publish:** time waiting for Kafka to acknowledge the ping (Kafka
+     mode).
    - **DB connection-pool wait:** time waiting to acquire a PostgreSQL
      connection.
    - **DB execute:** time for the insert query and returned row.

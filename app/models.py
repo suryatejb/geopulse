@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class PingCreate(BaseModel):
     vehicle_id: str = Field(min_length=1, max_length=100)
+    sequence_number: int | None = Field(default=None, ge=1)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     speed_kmh: float = Field(ge=0, le=300)
@@ -16,6 +17,13 @@ class PingCreate(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("recorded_at must include a timezone")
         return value
+
+
+class PingAccepted(BaseModel):
+    vehicle_id: str
+    sequence_number: int
+    recorded_at: datetime
+    accepted_at: datetime
 
 
 class PingResponse(BaseModel):

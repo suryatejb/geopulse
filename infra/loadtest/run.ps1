@@ -62,6 +62,7 @@ foreach ($rate in $Rates) {
     & $kubectl -n $namespace delete job $jobName --ignore-not-found --wait=true | Out-Null
 
     $countBefore = Get-PingCount
+    $testRunId = [guid]::NewGuid().ToString('N').Substring(0, 8)
 
     $job = @"
 apiVersion: batch/v1
@@ -85,6 +86,8 @@ spec:
               value: "$rate"
             - name: DURATION
               value: "${DurationSeconds}s"
+            - name: TEST_RUN_ID
+              value: "$testRunId"
           resources:
             requests:
               cpu: 500m
@@ -134,6 +137,7 @@ spec:
     $row = [pscustomobject]@{
         Target = $rate
         Requests = $r.requests
+        Accepted = $r.accepted
         Achieved = $r.achieved_per_s
         FailedPct = [math]::Round($r.failed_ratio * 100, 2)
         Dropped = $r.dropped

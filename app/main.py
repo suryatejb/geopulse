@@ -1,16 +1,26 @@
+import asyncio
+import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
+from aiokafka import AIOKafkaProducer
+from aiokafka.errors import KafkaError
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+from starlette.concurrency import run_in_threadpool
 
-from app.models import PingCount, PingCreate, PingResponse
+from app.models import PingAccepted, PingCount, PingCreate, PingResponse
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+KAFKA_PUBLISH_TIMEOUT_SECONDS = 5.0
 
 CREATE_PINGS_TABLE = """
 CREATE TABLE IF NOT EXISTS pings (
@@ -31,6 +41,10 @@ ON pings (vehicle_id, recorded_at DESC)
 
 
 def create_app() -> FastAPI:
+    ingestion_mode = os.getenv("PING_INGESTION_MODE", "postgres").strip().lower()
+    if ingestion_mode not in {"postgres", "kafka"}:
+        raise RuntimeError("PING_INGESTION_MODE must be 'postgres' or 'kafka'.")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database_url = os.getenv("DATABASE_URL")
@@ -48,21 +62,36 @@ def create_app() -> FastAPI:
             open=False,
         )
         pool.open(wait=True)
+        producer = None
         try:
             with pool.connection() as connection:
                 connection.execute(CREATE_PINGS_TABLE)
                 connection.execute(CREATE_VEHICLE_TIME_INDEX)
             app.state.pool = pool
+            if ingestion_mode == "kafka":
+                producer = AIOKafkaProducer(
+                    bootstrap_servers=os.getenv(
+                        "KAFKA_BOOTSTRAP_SERVERS",
+                        "geopulse-kafka-bootstrap.kafka.svc:9092",
+                    ),
+                    acks="all",
+                    enable_idempotence=True,
+                )
+                await producer.start()
+                app.state.kafka_producer = producer
             yield
         finally:
+            if producer is not None:
+                await producer.stop()
             pool.close()
 
     app = FastAPI(
         title="GeoPulse",
-        description="A baseline API for collecting simulated vehicle GPS pings.",
+        description="Collects simulated vehicle GPS pings in PostgreSQL or Kafka.",
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.state.ingestion_mode = ingestion_mode
 
     @app.middleware("http")
     async def add_api_timing(request: Request, call_next):
@@ -88,45 +117,92 @@ def create_app() -> FastAPI:
 
     @app.post(
         "/api/v1/pings",
-        response_model=PingResponse,
+        response_model=PingResponse | PingAccepted,
         status_code=status.HTTP_201_CREATED,
+        responses={status.HTTP_202_ACCEPTED: {"model": PingAccepted}},
     )
-    def create_ping(ping: PingCreate, request: Request, response: Response) -> dict:
-        pool_wait_started_at = time.perf_counter()
-        with request.app.state.pool.connection() as connection:
-            connection_acquired_at = time.perf_counter()
-            db_pool_ms = (connection_acquired_at - pool_wait_started_at) * 1000
-            db_execute_started_at = time.perf_counter()
-            row = connection.execute(
-                """
-                INSERT INTO pings (
-                    vehicle_id, latitude, longitude, speed_kmh, recorded_at
+    async def create_ping(
+        ping: PingCreate, request: Request, response: Response
+    ) -> dict | PingAccepted:
+        if ingestion_mode == "kafka":
+            if ping.sequence_number is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="sequence_number is required for Kafka ingestion.",
                 )
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id, vehicle_id, latitude, longitude, speed_kmh,
-                          recorded_at, received_at
-                """,
-                (
+            kafka_send_started_at = time.perf_counter()
+            try:
+                await asyncio.wait_for(
+                    request.app.state.kafka_producer.send_and_wait(
+                        "pings",
+                        key=ping.vehicle_id.encode("utf-8"),
+                        value=json.dumps(
+                            ping.model_dump(mode="json"),
+                            separators=(",", ":"),
+                        ).encode("utf-8"),
+                    ),
+                    timeout=KAFKA_PUBLISH_TIMEOUT_SECONDS,
+                )
+            except (KafkaError, asyncio.TimeoutError):
+                logger.exception(
+                    "Kafka did not acknowledge ping for vehicle %s sequence %d",
                     ping.vehicle_id,
-                    ping.latitude,
-                    ping.longitude,
-                    ping.speed_kmh,
-                    ping.recorded_at,
-                ),
-            ).fetchone()
-            db_execute_ms = (time.perf_counter() - db_execute_started_at) * 1000
-        db_transaction_ms = (time.perf_counter() - connection_acquired_at) * 1000
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="The database did not return the saved ping.",
+                    ping.sequence_number,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Kafka did not acknowledge the ping; it may still be published.",
+                ) from None
+            response.status_code = status.HTTP_202_ACCEPTED
+            response.headers["Server-Timing"] = (
+                f"kafka_send;dur="
+                f"{(time.perf_counter() - kafka_send_started_at) * 1000:.3f}"
             )
-        response.headers["Server-Timing"] = (
-            f"db_pool;dur={db_pool_ms:.3f}, "
-            f"db_execute;dur={db_execute_ms:.3f}, "
-            f"db_transaction;dur={db_transaction_ms:.3f}"
-        )
-        return row
+            return PingAccepted(
+                vehicle_id=ping.vehicle_id,
+                sequence_number=ping.sequence_number,
+                recorded_at=ping.recorded_at,
+                accepted_at=datetime.now(timezone.utc),
+            )
+
+        def save_ping() -> dict:
+            pool_wait_started_at = time.perf_counter()
+            with request.app.state.pool.connection() as connection:
+                connection_acquired_at = time.perf_counter()
+                db_pool_ms = (connection_acquired_at - pool_wait_started_at) * 1000
+                db_execute_started_at = time.perf_counter()
+                row = connection.execute(
+                    """
+                    INSERT INTO pings (
+                        vehicle_id, latitude, longitude, speed_kmh, recorded_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id, vehicle_id, latitude, longitude, speed_kmh,
+                              recorded_at, received_at
+                    """,
+                    (
+                        ping.vehicle_id,
+                        ping.latitude,
+                        ping.longitude,
+                        ping.speed_kmh,
+                        ping.recorded_at,
+                    ),
+                ).fetchone()
+                db_execute_ms = (time.perf_counter() - db_execute_started_at) * 1000
+            db_transaction_ms = (time.perf_counter() - connection_acquired_at) * 1000
+            if row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="The database did not return the saved ping.",
+                )
+            response.headers["Server-Timing"] = (
+                f"db_pool;dur={db_pool_ms:.3f}, "
+                f"db_execute;dur={db_execute_ms:.3f}, "
+                f"db_transaction;dur={db_transaction_ms:.3f}"
+            )
+            return row
+
+        return await run_in_threadpool(save_ping)
 
     @app.get("/api/v1/pings/count", response_model=PingCount)
     def count_pings(request: Request) -> dict[str, int]:

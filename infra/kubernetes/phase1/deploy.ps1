@@ -1,12 +1,14 @@
 param(
-    [double]$MinimumFreeGiB = 2
+    [double]$MinimumFreeGiB = 2,
+    [ValidateSet('postgres', 'kafka')]
+    [string]$IngestionMode = 'postgres'
 )
 
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $kubeconfig = Join-Path $repoRoot '.geopulse\kubeconfig'
-$image = 'geopulse-api:0.1.1'
+$image = 'geopulse-api:0.2.0'
 $namespace = 'geopulse'
 
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -63,6 +65,14 @@ if ($LASTEXITCODE -ne 0) {
 & $kubectl wait --for=condition=Ready nodes --all --timeout=90s
 if ($LASTEXITCODE -ne 0) {
     throw 'The kind cluster is not fully ready.'
+}
+
+if ($IngestionMode -eq 'kafka') {
+    Write-Warning 'Kafka mode has no database writer yet. Accepted pings can expire after topic retention.'
+    & $kubectl -n kafka wait kafka/geopulse --for=condition=Ready --timeout=600s
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The Kafka cluster is not ready. Install the Phase 2 Kafka infrastructure first.'
+    }
 }
 
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -139,7 +149,14 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($manifest in @('database.yaml', 'api.yaml')) {
     & $kubectl apply -f (Join-Path $PSScriptRoot $manifest)
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to apply Phase 1 manifest '$manifest'."
+        throw "Failed to apply manifest '$manifest'."
+    }
+}
+
+if ($IngestionMode -eq 'kafka') {
+    & $kubectl -n $namespace set env deployment/geopulse-api PING_INGESTION_MODE=kafka
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to enable Kafka ingestion.'
     }
 }
 
@@ -155,5 +172,5 @@ if ($LASTEXITCODE -ne 0) {
 
 & $kubectl -n $namespace get pods,services,persistentvolumeclaims
 if ($LASTEXITCODE -ne 0) {
-    throw 'Could not verify the Phase 1 Kubernetes resources.'
+    throw 'Could not verify the Kubernetes resources.'
 }

@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: geopulse-api:0.1.1
+          image: geopulse-api:0.2.0
           imagePullPolicy: IfNotPresent
           env:
             - name: DATABASE_URL
@@ -37,6 +37,10 @@ spec:
                 secretKeyRef:
                   name: geopulse-database
                   key: database-url
+            - name: PING_INGESTION_MODE
+              value: postgres
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: geopulse-kafka-bootstrap.kafka.svc:9092
           ports:
             - name: http
               containerPort: 8000

@@ -1,11 +1,12 @@
 import http from 'k6/http';
 import { check } from 'k6';
+import { Counter } from 'k6/metrics';
 
 const rate = Number(__ENV.RATE || 200);
 const duration = __ENV.DURATION || '30s';
-const vehicles = Number(__ENV.VEHICLES || 10000);
 const url = __ENV.API_URL || 'http://geopulse-api.geopulse.svc.cluster.local:8000/api/v1/pings';
 const timeout = __ENV.TIMEOUT || '10s';
+const acceptedPings = new Counter('accepted_pings');
 
 export const options = {
   scenarios: {
@@ -22,9 +23,11 @@ export const options = {
 };
 
 export default function () {
-  const vehicle = 1 + Math.floor(Math.random() * vehicles);
+  const vehicle = __VU;
+  const runId = __ENV.TEST_RUN_ID || 'local';
   const body = JSON.stringify({
-    vehicle_id: `vehicle-${String(vehicle).padStart(5, '0')}`,
+    vehicle_id: `vehicle-${runId}-${String(vehicle).padStart(5, '0')}`,
+    sequence_number: __ITER + 1,
     latitude: 40.7 + Math.random() * 0.1,
     longitude: -74.02 + Math.random() * 0.12,
     speed_kmh: Math.random() * 80,
@@ -34,7 +37,9 @@ export default function () {
     headers: { 'Content-Type': 'application/json' },
     timeout,
   });
-  check(response, { created: (r) => r.status === 201 });
+  const accepted = response.status === 201 || response.status === 202;
+  check(response, { accepted: () => accepted });
+  if (accepted) acceptedPings.add(1);
 }
 
 function metric(data, name, key) {
@@ -46,6 +51,7 @@ export function handleSummary(data) {
   const result = {
     target_rate: rate,
     requests: metric(data, 'http_reqs', 'count'),
+    accepted: metric(data, 'accepted_pings', 'count'),
     achieved_per_s: Number(metric(data, 'http_reqs', 'rate').toFixed(1)),
     failed_ratio: Number(metric(data, 'http_req_failed', 'rate').toFixed(4)),
     dropped: metric(data, 'dropped_iterations', 'count'),

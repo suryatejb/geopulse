@@ -1,10 +1,13 @@
 import asyncio
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+import pytest
 
+import app.main as api_module
 from app.main import create_app
 
 
@@ -50,6 +53,14 @@ class FakePool:
         yield FakeConnection(self)
 
 
+class FakeProducer:
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+
+    async def send_and_wait(self, topic: str, *, key: bytes, value: bytes) -> None:
+        self.messages.append({"topic": topic, "key": key, "value": value})
+
+
 def test_ping_api_saves_valid_request_and_reports_count() -> None:
     app = create_app()
     app.state.pool = FakePool()
@@ -90,11 +101,199 @@ def test_ping_api_saves_valid_request_and_reports_count() -> None:
                 "/api/v1/pings",
                 json={
                     "vehicle_id": "vehicle-00001",
+                    "sequence_number": 2,
                     "latitude": 100,
                     "longitude": -74.006,
                     "speed_kmh": 32.5,
                 },
             )
             assert invalid_response.status_code == 422
+
+    asyncio.run(exercise_api())
+
+
+def test_kafka_mode_returns_success_only_after_publishing_ping(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PING_INGESTION_MODE", "kafka")
+    app = create_app()
+    app.state.pool = FakePool()
+    app.state.kafka_producer = FakeProducer()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/pings",
+                json={
+                    "vehicle_id": "vehicle-00042",
+                    "sequence_number": 7,
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "speed_kmh": 32.5,
+                },
+            )
+            missing_sequence = await client.post(
+                "/api/v1/pings",
+                json={
+                    "vehicle_id": "vehicle-00042",
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "speed_kmh": 32.5,
+                },
+            )
+
+        assert response.status_code == 202
+        assert missing_sequence.status_code == 422
+        assert response.json()["vehicle_id"] == "vehicle-00042"
+        assert response.json()["sequence_number"] == 7
+        assert "kafka_send;dur=" in response.headers["Server-Timing"]
+        assert len(app.state.kafka_producer.messages) == 1
+        message = app.state.kafka_producer.messages[0]
+        assert message["topic"] == "pings"
+        assert message["key"] == b"vehicle-00042"
+        assert '"sequence_number":7' in message["value"].decode("utf-8")
+        assert app.state.pool.pings == []
+
+    asyncio.run(exercise_api())
+
+
+def test_kafka_mode_reports_unacknowledged_ping_as_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("PING_INGESTION_MODE", "kafka")
+    app = create_app()
+    app.state.pool = FakePool()
+
+    class FailedProducer:
+        async def send_and_wait(self, topic: str, *, key: bytes, value: bytes) -> None:
+            raise TimeoutError("broker did not acknowledge")
+
+    app.state.kafka_producer = FailedProducer()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/pings",
+                json={
+                    "vehicle_id": "vehicle-00042",
+                    "sequence_number": 7,
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "speed_kmh": 32.5,
+                },
+            )
+        assert response.status_code == 503
+
+    asyncio.run(exercise_api())
+
+
+def test_kafka_timeout_reports_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PING_INGESTION_MODE", "kafka")
+    monkeypatch.setattr(api_module, "KAFKA_PUBLISH_TIMEOUT_SECONDS", 0.05)
+    app = create_app()
+
+    class SlowProducer:
+        async def send_and_wait(self, topic: str, *, key: bytes, value: bytes) -> None:
+            await asyncio.sleep(10)
+
+    app.state.kafka_producer = SlowProducer()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = time.monotonic()
+            response = await client.post(
+                "/api/v1/pings",
+                json={
+                    "vehicle_id": "vehicle-00042",
+                    "sequence_number": 7,
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "speed_kmh": 32.5,
+                },
+            )
+            assert time.monotonic() - started < 1
+            assert response.status_code == 503
+            assert "may still" in response.json()["detail"]
+
+    asyncio.run(exercise_api())
+
+
+def test_kafka_response_waits_for_acknowledgment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PING_INGESTION_MODE", "kafka")
+    app = create_app()
+
+    async def exercise_api() -> None:
+        started = asyncio.Event()
+        acknowledged = asyncio.Event()
+
+        class DelayedProducer:
+            async def send_and_wait(self, topic: str, *, key: bytes, value: bytes) -> None:
+                started.set()
+                await acknowledged.wait()
+
+        app.state.kafka_producer = DelayedProducer()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/api/v1/pings",
+                    json={
+                        "vehicle_id": "vehicle-00042",
+                        "sequence_number": 1,
+                        "latitude": 40.7128,
+                        "longitude": -74.006,
+                        "speed_kmh": 32.5,
+                    },
+                )
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert not request.done()
+            acknowledged.set()
+            assert (await request).status_code == 202
+
+    asyncio.run(exercise_api())
+
+
+def test_slow_postgres_write_does_not_block_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PING_INGESTION_MODE", "postgres")
+    app = create_app()
+
+    class SlowPool(FakePool):
+        @contextmanager
+        def connection(self):
+            time.sleep(0.3)
+            yield FakeConnection(self)
+
+    app.state.pool = SlowPool()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = time.monotonic()
+            request = asyncio.create_task(
+                client.post(
+                    "/api/v1/pings",
+                    json={
+                        "vehicle_id": "vehicle-00001",
+                        "sequence_number": 1,
+                        "latitude": 40.7128,
+                        "longitude": -74.006,
+                        "speed_kmh": 32.5,
+                    },
+                )
+            )
+            await asyncio.sleep(0.05)
+            response = await client.get("/livez")
+            elapsed = time.monotonic() - started
+            await request
+            assert response.status_code == 200
+            assert elapsed < 0.25
 
     asyncio.run(exercise_api())
