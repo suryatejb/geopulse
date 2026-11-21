@@ -87,7 +87,7 @@ def send_ping(
 ) -> RequestTiming:
     started_at = time.perf_counter()
     response = client.post(api_url, json=make_ping(vehicle_number, sequence_number))
-    if response.status_code not in {201, 202}:
+    if response.status_code not in {200, 201, 202}:
         raise RuntimeError(f"API returned unexpected status {response.status_code}")
     request_ended_at = time.perf_counter()
     server_timings = parse_server_timing(response.headers.get("Server-Timing"))

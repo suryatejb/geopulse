@@ -181,8 +181,7 @@ touches Windows networking:
 Each rate runs for 30 seconds against the single API pod and single PostgreSQL
 pod. "Accepted" is the number of pings acknowledged by the API (either stored
 in PostgreSQL in baseline mode or acknowledged by Kafka in Kafka mode).
-"Stored" is the number of rows added to the database; it will remain zero in
-Kafka mode until the Phase 2 writer is added. API/DB cores are the CPU cores
+"Stored" is the number of rows added to the database. API/DB cores are the CPU cores
 the pod used on average during the run.
 
 | Target pings/s | Achieved/s | Failed | Median latency | p95 latency | API cores | DB cores |
@@ -232,8 +231,8 @@ the Kafka key, so a vehicle's pings go to the same partition. Kafka preserves
 the order in which it receives messages; it does not sort sequence numbers.
 Concurrent requests, timeouts, retries, or multiple producers can still put
 them out of order. Each ping carries a sequence number, and the API returns
-success only after Kafka acknowledges it. The separate database writer is not
-connected yet. A sequence number is required in Kafka mode; PostgreSQL mode
+success only after Kafka acknowledges it. The separate database writer consumes
+the same `pings` topic. A sequence number is required in Kafka mode; PostgreSQL mode
 still accepts older clients that do not send one.
 
 [Strimzi](https://strimzi.io) is a Kubernetes operator: a program that creates
@@ -276,11 +275,10 @@ the experimental Kafka path after installing Kafka, run:
 .\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka
 ```
 
-In this mode, the API returns HTTP 202 after Kafka acknowledges the ping, but
-the database count does not increase. **Do not use it for data you need to
-keep:** there is no writer yet, and Kafka may delete pings after its one-day
-retention period. Run the deployment script without `-IngestionMode kafka` to
-restore the PostgreSQL baseline.
+In this mode, the API returns HTTP 202 after Kafka acknowledges the ping. The
+writer consumes it and stores it in PostgreSQL. Run the deployment script
+without `-IngestionMode kafka` to restore the PostgreSQL baseline and remove
+the writer.
 
 The API waits up to five seconds for Kafka. A timeout returns HTTP 503 with an
 unknown outcome: the ping may still be written after the response. Retrying
@@ -288,13 +286,71 @@ could create a duplicate; producer idempotence only handles Kafka's internal
 retries, not a new HTTP request. The project does not yet guarantee no loss,
 deduplication, or sequence ordering during failures.
 
-**Next:** add the separate writer that consumes pings from Kafka and saves them
-to PostgreSQL, routing messages it cannot process to `pings-dlq`.
+Malformed JSON and messages that fail model validation are sent to `pings-dlq`.
+Kafka messages with a missing or null sequence number are also sent there.
+Database failures are not sent to the DLQ; the writer leaves the Kafka offset
+unconfirmed and retries because it is possible to recover by reconnecting or
+waiting for PostgreSQL.
 
-In PostgreSQL mode, the API writes each request to the database before
-replying. This is easy to understand, but it means every vehicle request waits
-for a database write. This direct-write mode remains available as a baseline
-against the Kafka path.
+In PostgreSQL mode, the API writes each request to the database before replying.
+This is easy to understand, but it means every vehicle request waits for a
+database write. This direct-write mode remains available as a baseline against
+the Kafka path. A new ping returns HTTP 201; a retry with an existing vehicle
+and sequence number returns the existing ping with HTTP 200 instead of adding
+a second row.
+
+When Kafka mode is enabled, a separate `geopulse-kafka-writer` Deployment reads
+`pings`, inserts each message into PostgreSQL, and manually confirms its Kafka
+offset only after the database insert succeeds. PostgreSQL stores the same
+vehicle and sequence number only once because it has a partial unique index on
+that pair; Kafka may still contain duplicate messages. The writer also has a consumer group, so it resumes at the
+unconfirmed offset after a restart.
+
+### Writer recovery check
+
+A small local recovery test stopped the writer, accepted 20 Kafka pings while
+the writer was offline, and restarted the writer. PostgreSQL then contained all
+20 rows exactly once: rows 20, distinct sequence numbers 20, with sequence
+numbers 1 through 20. The test rows were removed afterward. This is a
+small-run check, not a production durability guarantee.
+
+A second isolated test used temporary Kafka topics and interrupted only the
+writer's database connection via a local proxy; PostgreSQL itself stayed online.
+While the connection was down, the committed offset remained at 2. After
+reconnection, the two waiting pings were stored and the offset advanced to 4.
+The test also verified that a ping missing its sequence number reached the DLQ.
+Temporary topics and database rows were removed afterward.
+
+A subsequent two-minute test stopped the writer, sent one ping per second for
+120 seconds, and restarted it. All 120 requests were acknowledged, no rows
+appeared while the writer was stopped, and all 120 sequence numbers were saved
+once after restart. Catch-up took 5.21 seconds including pod startup. This
+small test does not prove zero loss under all failures.
+
+### Kafka comparison (November 21, 2026)
+
+The in-cluster k6 test ran for 30 seconds at each rate with one API pod and
+one writer. All requests were accepted, with no failed or dropped requests:
+
+| Target pings/s | Achieved/s | HTTP median | HTTP p95 | API cores | DB cores |
+|---:|---:|---:|---:|---:|---:|
+| 500 | 500.0 | 2.9 ms | 8.3 ms | 0.58 | 0.15 |
+| 600 | 599.9 | 2.4 ms | 6.1 ms | 0.59 | 0.15 |
+| 700 | 699.9 | 2.3 ms | 5.8 ms | 0.65 | 0.15 |
+
+For comparison, the earlier direct-write baseline had a p95 of 33 ms at
+500/s, 3,929 ms at 600/s, and 10,000 ms at 700/s with 10.9% failed requests.
+These are single local runs, not production capacity guarantees. The current
+test includes sequence numbers and different vehicle IDs, and the database
+schema and software have changed since the baseline, so the comparison is
+indicative rather than a controlled like-for-like experiment.
+
+The writer lagged during each Kafka run; the database row-count changes
+measured during the runs (10,661, 12,517 and 12,826 respectively) can include
+earlier backlog and are not per-run delivery counts. After the runs, the
+writer's reported Kafka lag was zero in all six partitions. This is not a
+per-ping proof of delivery. API, Kafka, PostgreSQL, writer and k6 shared the
+same laptop; monitoring remained off.
 
 ### What is in this phase
 

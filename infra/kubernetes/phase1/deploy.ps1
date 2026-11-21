@@ -68,7 +68,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($IngestionMode -eq 'kafka') {
-    Write-Warning 'Kafka mode has no database writer yet. Accepted pings can expire after topic retention.'
     & $kubectl -n kafka wait kafka/geopulse --for=condition=Ready --timeout=600s
     if ($LASTEXITCODE -ne 0) {
         throw 'The Kafka cluster is not ready. Install the Phase 2 Kafka infrastructure first.'
@@ -153,11 +152,30 @@ foreach ($manifest in @('database.yaml', 'api.yaml')) {
     }
 }
 
+& $kubectl -n $namespace rollout restart deployment/geopulse-api
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to restart the API with the newly built image.'
+}
+
 if ($IngestionMode -eq 'kafka') {
     & $kubectl -n $namespace set env deployment/geopulse-api PING_INGESTION_MODE=kafka
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to enable Kafka ingestion.'
     }
+    & $kubectl apply -f (Join-Path $repoRoot 'infra\kubernetes\phase2\writer.yaml')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to deploy the Kafka ping writer.'
+    }
+    & $kubectl -n $namespace rollout restart deployment/geopulse-kafka-writer
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to restart the Kafka ping writer with the newly built image.'
+    }
+    & $kubectl -n $namespace rollout status deployment/geopulse-kafka-writer --timeout=180s
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The Kafka ping writer did not become ready in time.'
+    }
+} else {
+    & $kubectl -n $namespace delete deployment geopulse-kafka-writer --ignore-not-found
 }
 
 & $kubectl -n $namespace rollout status statefulset/postgres --timeout=180s

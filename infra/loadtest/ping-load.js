@@ -37,7 +37,7 @@ export default function () {
     headers: { 'Content-Type': 'application/json' },
     timeout,
   });
-  const accepted = response.status === 201 || response.status === 202;
+  const accepted = response.status === 200 || response.status === 201 || response.status === 202;
   check(response, { accepted: () => accepted });
   if (accepted) acceptedPings.add(1);
 }

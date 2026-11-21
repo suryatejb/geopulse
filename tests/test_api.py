@@ -12,10 +12,10 @@ from app.main import create_app
 
 
 class FakeCursor:
-    def __init__(self, row: dict[str, Any]) -> None:
+    def __init__(self, row: dict[str, Any] | None) -> None:
         self.row = row
 
-    def fetchone(self) -> dict[str, Any]:
+    def fetchone(self) -> dict[str, Any] | None:
         return self.row
 
 
@@ -28,17 +28,32 @@ class FakeConnection:
     ) -> FakeCursor:
         if query.strip().startswith("INSERT INTO pings"):
             assert parameters is not None
+            if parameters[1] is not None and any(
+                ping["vehicle_id"] == parameters[0]
+                and ping["sequence_number"] == parameters[1]
+                for ping in self.pool.pings
+            ):
+                return FakeCursor(None)
             row = {
                 "id": len(self.pool.pings) + 1,
                 "vehicle_id": parameters[0],
-                "latitude": parameters[1],
-                "longitude": parameters[2],
-                "speed_kmh": parameters[3],
-                "recorded_at": parameters[4],
+                "sequence_number": parameters[1],
+                "latitude": parameters[2],
+                "longitude": parameters[3],
+                "speed_kmh": parameters[4],
+                "recorded_at": parameters[5],
                 "received_at": datetime.now(timezone.utc),
             }
             self.pool.pings.append(row)
             return FakeCursor(row)
+        if query.strip().startswith("SELECT id, vehicle_id"):
+            assert parameters is not None
+            return FakeCursor(next(
+                (ping for ping in self.pool.pings
+                 if ping["vehicle_id"] == parameters[0]
+                 and ping["sequence_number"] == parameters[1]),
+                None,
+            ))
         if "COUNT(*)" in query:
             return FakeCursor({"count": len(self.pool.pings)})
         return FakeCursor({"result": 1})
@@ -108,6 +123,33 @@ def test_ping_api_saves_valid_request_and_reports_count() -> None:
                 },
             )
             assert invalid_response.status_code == 422
+
+    asyncio.run(exercise_api())
+
+
+def test_postgres_duplicate_sequence_returns_original_ping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PING_INGESTION_MODE", "postgres")
+    app = create_app()
+    app.state.pool = FakePool()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            ping = {
+                "vehicle_id": "vehicle-00001",
+                "sequence_number": 1,
+                "latitude": 40.7128,
+                "longitude": -74.006,
+                "speed_kmh": 32.5,
+            }
+            first = await client.post("/api/v1/pings", json=ping)
+            retry = await client.post("/api/v1/pings", json=ping)
+            assert first.status_code == 201
+            assert retry.status_code == 200
+            assert retry.json()["id"] == first.json()["id"]
+            assert len(app.state.pool.pings) == 1
 
     asyncio.run(exercise_api())
 

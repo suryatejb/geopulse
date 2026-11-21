@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: geopulse-kafka-writer
+  namespace: geopulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: geopulse-kafka-writer
+  template:
+    metadata:
+      labels:
+        app: geopulse-kafka-writer
+    spec:
+      containers:
+        - name: kafka-writer
+          image: geopulse-api:0.2.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.kafka_writer
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-database
+                  key: database-url
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: geopulse-kafka-bootstrap.kafka.svc:9092
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 384Mi

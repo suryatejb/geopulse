@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class PingCreate(BaseModel):
     vehicle_id: str = Field(min_length=1, max_length=100)
-    sequence_number: int | None = Field(default=None, ge=1)
+    sequence_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     speed_kmh: float = Field(ge=0, le=300)
@@ -31,6 +31,7 @@ class PingResponse(BaseModel):
 
     id: int
     vehicle_id: str
+    sequence_number: int | None = None
     latitude: float
     longitude: float
     speed_kmh: float
