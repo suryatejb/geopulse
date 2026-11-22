@@ -288,6 +288,26 @@ deduplication, or sequence ordering during failures.
 
 Malformed JSON and messages that fail model validation are sent to `pings-dlq`.
 Kafka messages with a missing or null sequence number are also sent there.
+Each DLQ message keeps the readable `reason` and `original` fields, plus
+`original_base64` for the exact original bytes and `source` with the original
+topic, partition, and offset. Decode `original_base64` to recover the bytes;
+`null` means the Kafka value was null, while an empty string means empty bytes.
+The readable `original` replaces invalid UTF-8 bytes and must not be used for
+exact recovery. The original Kafka key is retained as the DLQ message key.
+
+The DLQ envelope is larger than the original message. A large malformed message
+can exceed the producer or broker message-size limit and fail to reach the DLQ.
+The writer logs the failure, retries without confirming that source offset, and
+can block subsequent processing until the problem is resolved. No truncation
+or automatic handling of oversized DLQ messages is implemented yet.
+
+An isolated Kafka check on November 22, 2026 ran the current writer code in the
+API container against temporary topics. Invalid UTF-8 bytes, empty bytes, and
+a null value all reached the DLQ with their original values, keys, and source
+locations intact; the test group's committed offset advanced to 3. The test
+topics and consumer group were removed afterward. This tested the malformed
+message path, not a deployed writer or database writes.
+
 Database failures are not sent to the DLQ; the writer leaves the Kafka offset
 unconfirmed and retries because it is possible to recover by reconnecting or
 waiting for PostgreSQL.

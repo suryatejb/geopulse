@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -7,7 +8,7 @@ from typing import Any
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.errors import KafkaError
-from aiokafka.structs import TopicPartition
+from aiokafka.structs import ConsumerRecord, TopicPartition
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
@@ -95,11 +96,20 @@ def save_ping(pool: ConnectionPool, ping: PingCreate) -> bool:
     return row is not None
 
 
-def dlq_payload(value: bytes, reason: str) -> bytes:
+def dlq_payload(record: ConsumerRecord[bytes, bytes], reason: str) -> bytes:
+    value = record.value
     return json.dumps(
         {
             "reason": reason,
-            "original": value.decode("utf-8", errors="replace"),
+            "original": (value or b"").decode("utf-8", errors="replace"),
+            "original_base64": (
+                base64.b64encode(value).decode("ascii") if value is not None else None
+            ),
+            "source": {
+                "topic": record.topic,
+                "partition": record.partition,
+                "offset": record.offset,
+            },
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -208,7 +218,7 @@ async def run_writer() -> None:
             try:
                 ping = await asyncio.to_thread(parse_ping, record.value)
             except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError) as error:
-                payload = dlq_payload(record.value or b"", str(error))
+                payload = dlq_payload(record, str(error))
                 published = await retry_dlq_publish(
                     producer,
                     record,
