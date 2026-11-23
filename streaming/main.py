@@ -14,15 +14,16 @@ def main() -> None:
     if not checkpoint_location:
         raise RuntimeError("SPARK_CHECKPOINT_LOCATION is required for live statistics")
 
-    spark = (
+    builder = (
         SparkSession.builder.appName("geopulse-live-statistics")
-        .master("local[1]")
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "1")
-        .config("spark.driver.memory", "512m")
-        .getOrCreate()
+        .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS", "2"))
     )
+    master = os.getenv("SPARK_MASTER")
+    if master:
+        builder = builder.master(master)
+    spark = builder.getOrCreate()
     try:
         pings = read_kafka_pings(
             spark,

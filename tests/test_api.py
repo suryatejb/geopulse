@@ -77,6 +77,17 @@ class FakeProducer:
         self.messages.append({"topic": topic, "key": key, "value": value})
 
 
+class FakeStatsRedis:
+    def __init__(self, values: list[bytes | None]) -> None:
+        self.values = values
+        self.requested_key: str | None = None
+
+    def hmget(self, key: str, *fields: str) -> list[bytes | None]:
+        self.requested_key = key
+        assert fields == ("vehicle_count", "speed_sum")
+        return self.values
+
+
 def test_ping_api_saves_valid_request_and_reports_count() -> None:
     app = create_app()
     app.state.pool = FakePool()
@@ -124,6 +135,80 @@ def test_ping_api_saves_valid_request_and_reports_count() -> None:
                 },
             )
             assert invalid_response.status_code == 422
+
+    asyncio.run(exercise_api())
+
+
+def test_area_stats_endpoint_returns_redis_average() -> None:
+    app = create_app()
+    app.state.redis = FakeStatsRedis([b"2", b"70"])
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/v1/stats/area",
+                params={
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "minute_start": 60,
+                },
+            )
+        assert response.status_code == 200
+        assert response.json() == {
+            "h3_cell": "882a107289fffff",
+            "minute_start": 60,
+            "vehicle_count": 2,
+            "average_speed_kmh": 35.0,
+        }
+        assert app.state.redis.requested_key == "geopulse:stats:60:882a107289fffff"
+
+    asyncio.run(exercise_api())
+
+
+def test_area_stats_endpoint_reports_missing_data_and_missing_redis() -> None:
+    async def request_stats(app) -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                "/api/v1/stats/area",
+                params={
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "minute_start": 60,
+                },
+            )
+
+    async def exercise_api() -> None:
+        no_redis = await request_stats(create_app())
+        assert no_redis.status_code == 503
+
+        no_data_app = create_app()
+        no_data_app.state.redis = FakeStatsRedis([None, None])
+        no_data = await request_stats(no_data_app)
+        assert no_data.status_code == 404
+
+    asyncio.run(exercise_api())
+
+
+def test_dashboard_page_is_served() -> None:
+    app = create_app()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/dashboard")
+        assert response.status_code == 200
+        assert "Live area statistics" in response.text
 
     asyncio.run(exercise_api())
 

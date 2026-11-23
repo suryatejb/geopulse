@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: geopulse-api:0.2.0
+          image: geopulse-api:0.3.0
           imagePullPolicy: IfNotPresent
           env:
             - name: DATABASE_URL
@@ -41,6 +41,8 @@ spec:
               value: postgres
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: geopulse-kafka-bootstrap.kafka.svc:9092
+            - name: REDIS_URL
+              value: redis://geopulse-phase3-redis.geopulse.svc:6379/0
           ports:
             - name: http
               containerPort: 8000

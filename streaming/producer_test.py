@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiokafka import AIOKafkaProducer
 
@@ -16,11 +16,15 @@ async def main() -> None:
     await producer.start()
     try:
         now = datetime.now(timezone.utc)
-        minute = now.replace(second=10, microsecond=0)
+        minute_start = int(os.getenv("PHASE3_TEST_MINUTE_START", "0"))
+        if not minute_start:
+            minute_start = int((now - timedelta(minutes=2)).timestamp()) // 60 * 60
+        minute = datetime.fromtimestamp(minute_start, timezone.utc)
         pings = [
-            ("phase3-a", 1, minute, 20.0),
-            ("phase3-a", 2, minute.replace(second=20), 60.0),
-            ("phase3-b", 1, minute.replace(second=30), 10.0),
+            ("phase3-a", 1, minute + timedelta(seconds=10), 20.0),
+            ("phase3-a", 2, minute + timedelta(seconds=20), 60.0),
+            ("phase3-b", 1, minute + timedelta(seconds=30), 10.0),
+            ("phase3-watermark", 1, max(now, minute + timedelta(minutes=3)), 0.0),
         ]
         for vehicle_id, sequence_number, recorded_at, speed_kmh in pings:
             ping = {
@@ -32,6 +36,7 @@ async def main() -> None:
                 "recorded_at": recorded_at.isoformat().replace("+00:00", "Z"),
             }
             await producer.send_and_wait(topic, json.dumps(ping).encode("utf-8"))
+        print(f"TARGET_MINUTE_START={minute_start}")
     finally:
         await producer.stop()
 

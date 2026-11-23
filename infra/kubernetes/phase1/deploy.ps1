@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $kubeconfig = Join-Path $repoRoot '.geopulse\kubeconfig'
-$image = 'geopulse-api:0.2.0'
+$image = 'geopulse-api:0.3.0'
 $namespace = 'geopulse'
 
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')

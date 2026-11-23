@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GeoPulse live area statistics</title>
+    <style>
+      body {
+        color: #172033;
+        font: 16px/1.5 system-ui, sans-serif;
+        margin: 3rem auto;
+        max-width: 44rem;
+        padding: 0 1rem;
+      }
+      form, dl { display: grid; gap: 1rem; }
+      form { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
+      label { display: grid; gap: .35rem; }
+      input, button { font: inherit; padding: .55rem; }
+      button { align-self: end; }
+      dl { grid-template-columns: 1fr auto; }
+      dt, dd { margin: 0; }
+      dd { font-variant-numeric: tabular-nums; }
+      #status { min-height: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <h1>Live area statistics</h1>
+    <p>Choose a location. GeoPulse shows stats for its H3 area in the latest completed UTC minute.</p>
+    <form id="area-form">
+      <label>
+        Latitude
+        <input id="latitude" type="number" min="-90" max="90" step="any" value="40.7128" required>
+      </label>
+      <label>
+        Longitude
+        <input id="longitude" type="number" min="-180" max="180" step="any" value="-74.006" required>
+      </label>
+      <button type="submit">Refresh</button>
+    </form>
+    <p id="status" role="status" aria-live="polite">Loading…</p>
+    <dl>
+      <dt>H3 cell</dt><dd id="cell">—</dd>
+      <dt>UTC minute</dt><dd id="minute">—</dd>
+      <dt>Vehicles</dt><dd id="vehicles">—</dd>
+      <dt>Average speed</dt><dd id="speed">—</dd>
+    </dl>
+    <script>
+      const form = document.querySelector("#area-form");
+      const status = document.querySelector("#status");
+      const fields = {
+        cell: document.querySelector("#cell"),
+        minute: document.querySelector("#minute"),
+        vehicles: document.querySelector("#vehicles"),
+        speed: document.querySelector("#speed"),
+      };
+
+      async function refreshStats() {
+        const params = new URLSearchParams({
+          latitude: document.querySelector("#latitude").value,
+          longitude: document.querySelector("#longitude").value,
+        });
+        status.textContent = "Loading latest completed minute…";
+        try {
+          const response = await fetch(`/api/v1/stats/area?${params}`);
+          if (response.status === 404) {
+            status.textContent = "No data for this area in the latest completed minute.";
+            Object.values(fields).forEach((field) => { field.textContent = "—"; });
+            return;
+          }
+          if (!response.ok) {
+            throw new Error(`Request failed (${response.status}).`);
+          }
+          const stats = await response.json();
+          fields.cell.textContent = stats.h3_cell;
+          fields.minute.textContent = new Date(stats.minute_start * 1000).toISOString();
+          fields.vehicles.textContent = stats.vehicle_count;
+          fields.speed.textContent = `${stats.average_speed_kmh.toFixed(1)} km/h`;
+          status.textContent = "Updated.";
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        refreshStats();
+      });
+      refreshStats();
+      window.setInterval(refreshStats, 60_000);
+    </script>
+  </body>
+</html>

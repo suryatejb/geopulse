@@ -1,0 +1,64 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: geopulse-live-statistics
+  namespace: geopulse
+spec:
+  type: Python
+  mode: cluster
+  sparkVersion: 4.0.5
+  image: geopulse-phase3-spark:0.2.1
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: local:///opt/geopulse/streaming/main.py
+  deps:
+    packages:
+      - org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.5
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 10
+    onFailureRetryInterval: 30
+    onSubmissionFailureRetries: 3
+    onSubmissionFailureRetryInterval: 30
+  sparkConf:
+    spark.sql.shuffle.partitions: "2"
+    spark.sql.session.timeZone: UTC
+    spark.jars.ivy: /tmp/geopulse-spark-ivy
+    spark.driver.memoryOverhead: 384m
+    spark.executor.memoryOverhead: 384m
+  volumes:
+    - name: checkpoint
+      persistentVolumeClaim:
+        claimName: geopulse-phase3-checkpoint
+  driver:
+    cores: 1
+    coreLimit: "1000m"
+    memory: 512m
+    serviceAccount: geopulse-spark-operator-spark
+    env:
+      - name: REDIS_URL
+        value: redis://geopulse-phase3-redis.geopulse.svc:6379/0
+      - name: SPARK_CHECKPOINT_LOCATION
+        value: file:///checkpoint
+      - name: KAFKA_BOOTSTRAP_SERVERS
+        value: geopulse-kafka-bootstrap.kafka.svc:9092
+      - name: KAFKA_TOPIC
+        value: pings
+      - name: PYSPARK_PYTHON
+        value: /opt/venv/bin/python
+      - name: PYTHONPATH
+        value: /opt/geopulse
+    volumeMounts:
+      - name: checkpoint
+        mountPath: /checkpoint
+  executor:
+    cores: 1
+    instances: 1
+    memory: 512m
+    volumeMounts:
+      - name: checkpoint
+        mountPath: /checkpoint
+    env:
+      - name: PYSPARK_PYTHON
+        value: /opt/venv/bin/python
+      - name: PYTHONPATH
+        value: /opt/geopulse

@@ -41,3 +41,10 @@ class PingResponse(BaseModel):
 
 class PingCount(BaseModel):
     count: int
+
+
+class AreaStats(BaseModel):
+    h3_cell: str
+    minute_start: int
+    vehicle_count: int
+    average_speed_kmh: float

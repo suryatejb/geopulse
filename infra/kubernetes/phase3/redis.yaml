@@ -4,6 +4,7 @@ metadata:
   name: geopulse-phase3-redis
   namespace: geopulse
 spec:
+  clusterIP: None
   selector:
     app: geopulse-phase3-redis
   ports:
@@ -12,12 +13,13 @@ spec:
       targetPort: redis
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: geopulse-phase3-redis
   namespace: geopulse
 spec:
   replicas: 1
+  serviceName: geopulse-phase3-redis
   selector:
     matchLabels:
       app: geopulse-phase3-redis
@@ -31,17 +33,48 @@ spec:
           image: redis:7.4.12-alpine
           args:
             - redis-server
-            - --save
-            - ""
             - --appendonly
-            - "no"
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --dir
+            - /data
+            - --save
+            - "60"
+            - "1"
           ports:
             - name: redis
               containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 10
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m
-              memory: 32Mi
+              memory: 64Mi
             limits:
               cpu: 500m
-              memory: 128Mi
+              memory: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

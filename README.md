@@ -133,7 +133,7 @@ From the project folder in PowerShell, with Docker Desktop running and at least
 .\infra\kubernetes\phase1\deploy.ps1
 ```
 
-The script builds `geopulse-api:0.2.0`, loads it into the `geopulse` kind
+The script builds `geopulse-api:0.3.0`, loads it into the `geopulse` kind
 cluster, creates the database and API resources, and waits for them to become
 ready. It leaves the database in the cluster; it does not change your local
 PostgreSQL installation or database.
@@ -281,67 +281,81 @@ without `-IngestionMode kafka` to restore the PostgreSQL baseline and remove
 the writer.
 
 New Kafka pings also include `h3_cell`, the H3 resolution 8 hexagon containing
-their latitude and longitude (about 0.7 km² on average). This prepares for
-Phase 3 area statistics; the database writer still accepts older Kafka pings
-without that field. Historical pings will need their cell calculated from their
-coordinates when they are processed. A Kafka source for the Spark pipeline is
-implemented but has not yet been tested with a live broker; a Redis deployment
-is also not yet implemented.
-The planned per-minute statistics will count distinct vehicles in each cell
-and average each vehicle's latest reported speed in that cell and minute, so
-a vehicle sending more pings does not get extra weight.
+their latitude and longitude (about 0.7 km² on average). Spark recalculates
+the cell from coordinates so older messages without `h3_cell` are supported.
+For each one-minute UTC window and cell, the pipeline keeps each vehicle's
+latest speed; timestamps are ordered by sequence number and then speed to
+break ties. Each vehicle contributes once to the average.
 
-The first Phase 3 building block is `streaming/aggregation.py`: it calculates
-each vehicle's latest speed for a one-minute UTC window and H3 cell, including
-for older pings without `h3_cell`. If timestamps tie, the greater sequence
-number wins; if those also tie, the greater speed wins deterministically.
-The calculation expects validated pings with a timestamp and sequence number.
-It is not yet a running Kafka-to-Redis pipeline.
+`streaming/main.py` reads Kafka pings and sends per-vehicle window updates to
+Redis. A new checkpoint starts at the earliest available Kafka offset. Spark
+logs a warning with topic, partition, and offset and skips invalid messages.
+It also skips messages without an explicit `recorded_at` so replay remains
+deterministic. The database writer handles its own DLQ publication; Spark does
+not wait for or guarantee that publication.
 
-`streaming/main.py` reads `pings` from Kafka, starting at the earliest available
-offset for a new checkpoint. Set `REDIS_URL` and `SPARK_CHECKPOINT_LOCATION`;
-`KAFKA_BOOTSTRAP_SERVERS` and `KAFKA_TOPIC` may override the cluster bootstrap
-address and `pings` topic. The checkpoint must survive restarts. Deployments
-must supply the Spark Kafka connector matching their Spark version (for example,
-`org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.5` for Spark 4.0.5), along
-with the Python modules used by the job.
+Redis stores a vehicle count and speed sum for each cell and minute, with keys
+expiring 24 hours after the window ends. Atomic updates make retries and older
+observations idempotent. The deployment uses Redis AOF plus a PVC, and stores
+the Spark checkpoint on a separate PVC mounted by the driver and executor.
+These local kind volumes survive pod restarts, but do not protect against
+losing the node or cluster.
 
-Spark logs a warning with the source topic, partition, and offset and skips
-invalid messages so the live scoreboard can continue. The database writer
-independently sends messages it rejects to the DLQ; Spark does not wait for or
-guarantee that DLQ publication. Spark also skips messages without an explicit
-`recorded_at`, because using the current time would make replay inconsistent.
-The database writer currently accepts such messages and assigns a time, so
-they may be stored in PostgreSQL without appearing in live statistics or the
-DLQ.
+Deploy Phase 3 with the Spark Operator, persistent Redis, and the Spark job
+consuming the existing `pings` topic:
 
-The separate `streaming/redis_sink.py` building block keeps a vehicle count
-and sum of latest vehicle speeds for each cell and minute, expiring them
-24 hours after the minute ends. Updates use an atomic Redis script so replayed
-or older observations do not inflate the count or overwrite a newer speed.
-`streaming/batch_sink.py` can write the Spark calculation's per-vehicle
-updates to Redis; `streaming/pipeline.py` connects it to a validated Spark
-stream and a checkpoint location. If a batch fails after some updates,
-restarting the query from the same checkpoint retries it; repeating those
-updates does not add extra vehicles or revert newer speeds. The sink tests
-passed against an isolated Redis 7.4.12 server with persistence disabled as
-well as a Redis emulator, and a simulated partial batch failure was tested
-against the emulator.
+```powershell
+.\infra\kubernetes\phase3\deploy.ps1
+```
 
-On November 22, 2026, an isolated Linux test used a file stream, Spark 4.0.5,
-and Redis 7.4.12. It fed Kafka-shaped records, including invalid UTF-8 and a
-null value, through the parser and checked the vehicle count and average, a
-failed Redis connection followed by a checkpoint restart, and late data both
-within and beyond the watermark. This did not test a live Kafka source or
-Redis persistence.
+The script builds and loads the Spark 4.0.5 image, installs the Spark Operator
+2.6.0 scoped to the `geopulse` namespace, then starts Redis and the
+`SparkApplication`. It checks host memory before deployment. To verify Redis
+and Spark recovery before starting the production Spark job, prepare the
+infrastructure without the live application, then run the isolated test:
 
-A cluster-side live test on November 22, 2026 used the kind Kafka cluster,
-Spark 4.0.5, and an isolated Redis 7.4.12 deployment. It published three pings
-for two vehicles to a dedicated `pings-phase3-live` topic and verified the
-result in Redis: two vehicles and a 35 km/h average. The test topic, Redis
-deployment, checkpoint, and Spark job were removed afterward. Reusable Phase 3
-manifests are in `infra/kubernetes/phase3/`, and `streaming/producer_test.py`
-provides a cluster-side test producer.
+```powershell
+.\infra\kubernetes\phase3\deploy.ps1 -SkipSparkApplication
+.\infra\kubernetes\phase3\test-recovery.ps1
+.\infra\kubernetes\phase3\deploy.ps1
+```
+
+The recovery test checks that Redis data survives a pod restart and that Spark
+resumes from its existing checkpoint and continues ingesting. It removes its
+test topic, application, Redis instance, and PVCs on completion. To stop the
+live pipeline while retaining its data:
+
+On November 23, 2026, the recovery test passed in kind: Redis data survived a
+Redis pod restart, and Spark resumed from its checkpoint and ingested a new
+batch. Recovery from node or cluster loss has not been tested.
+
+```powershell
+.\infra\kubernetes\phase3\remove.ps1
+```
+
+Use `-DeleteData` only when intentionally deleting the Redis and checkpoint
+PVCs. Use `-RemoveOperator` to uninstall the Spark Operator release as well.
+
+The API also serves a small live scoreboard at `/dashboard`. It uses the
+coordinates you enter to select an H3 area, then shows that area's vehicle
+count and average speed for the latest completed UTC minute. It refreshes every
+minute. After Phase 3 is deployed, rebuild/redeploy the API with the same
+ingestion mode you want to keep. For Kafka ingestion:
+
+```powershell
+.\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka
+```
+
+For the PostgreSQL baseline, run the same script without the parameter. Then
+forward its service:
+
+```powershell
+kubectl -n geopulse port-forward service/geopulse-api 8000:8000
+```
+
+Open <http://127.0.0.1:8000/dashboard>. The underlying read-only endpoint is
+`/api/v1/stats/area`; `/docs` also documents its coordinate and optional
+`minute_start` parameters. In a local API run, set `REDIS_URL` to enable it.
 
 To run its local Spark test, install the separate streaming dependencies and
 use a Java runtime supported by PySpark:

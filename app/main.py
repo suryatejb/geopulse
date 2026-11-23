@@ -10,13 +10,17 @@ from typing import AsyncIterator
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaError
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+from redis import Redis
+from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
 
+from app.area_stats import read_area_stats
 from app.geo import location_cell
-from app.models import PingAccepted, PingCount, PingCreate, PingResponse
+from app.models import AreaStats, PingAccepted, PingCount, PingCreate, PingResponse
 
 load_dotenv()
 
@@ -76,6 +80,7 @@ def create_app() -> FastAPI:
         )
         pool.open(wait=True)
         producer = None
+        redis_client = None
         try:
             with pool.connection() as connection:
                 connection.execute(CREATE_PINGS_TABLE)
@@ -83,6 +88,10 @@ def create_app() -> FastAPI:
                 connection.execute(CREATE_VEHICLE_TIME_INDEX)
                 connection.execute(CREATE_UNIQUE_PING_INDEX)
             app.state.pool = pool
+            redis_url = os.getenv("REDIS_URL")
+            if redis_url:
+                redis_client = Redis.from_url(redis_url)
+                app.state.redis = redis_client
             if ingestion_mode == "kafka":
                 producer = AIOKafkaProducer(
                     bootstrap_servers=os.getenv(
@@ -98,6 +107,8 @@ def create_app() -> FastAPI:
         finally:
             if producer is not None:
                 await producer.stop()
+            if redis_client is not None:
+                redis_client.close()
             pool.close()
 
     app = FastAPI(
@@ -129,6 +140,50 @@ def create_app() -> FastAPI:
         with request.app.state.pool.connection() as connection:
             connection.execute("SELECT 1")
         return {"status": "ok", "database": "ok"}
+
+    @app.get("/dashboard", include_in_schema=False)
+    def dashboard() -> FileResponse:
+        return FileResponse(os.path.join(os.path.dirname(__file__), "dashboard.html"))
+
+    @app.get("/api/v1/stats/area", response_model=AreaStats)
+    def area_stats(
+        request: Request,
+        latitude: float = Query(ge=-90, le=90),
+        longitude: float = Query(ge=-180, le=180),
+        minute_start: int | None = Query(default=None, ge=0, multiple_of=60),
+    ) -> AreaStats:
+        client = getattr(request.app.state, "redis", None)
+        if client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Live statistics are not configured.",
+            )
+
+        if minute_start is None:
+            minute_start = (int(time.time()) // 60 * 60) - 60
+        cell = location_cell(latitude, longitude)
+        try:
+            stats = read_area_stats(
+                client, cell=cell, minute_start=minute_start
+            )
+        except RedisError:
+            logger.exception("Could not read live statistics from Redis")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Live statistics are temporarily unavailable.",
+            ) from None
+        if stats is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No statistics are available for this area and minute.",
+            )
+        vehicle_count, average_speed_kmh = stats
+        return AreaStats(
+            h3_cell=cell,
+            minute_start=minute_start,
+            vehicle_count=vehicle_count,
+            average_speed_kmh=average_speed_kmh,
+        )
 
     @app.post(
         "/api/v1/pings",
