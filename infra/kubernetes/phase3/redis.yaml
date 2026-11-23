@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: geopulse-phase3-redis
+  namespace: geopulse
+spec:
+  selector:
+    app: geopulse-phase3-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: geopulse-phase3-redis
+  namespace: geopulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: geopulse-phase3-redis
+  template:
+    metadata:
+      labels:
+        app: geopulse-phase3-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4.12-alpine
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi

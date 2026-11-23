@@ -335,6 +335,14 @@ failed Redis connection followed by a checkpoint restart, and late data both
 within and beyond the watermark. This did not test a live Kafka source or
 Redis persistence.
 
+A cluster-side live test on November 22, 2026 used the kind Kafka cluster,
+Spark 4.0.5, and an isolated Redis 7.4.12 deployment. It published three pings
+for two vehicles to a dedicated `pings-phase3-live` topic and verified the
+result in Redis: two vehicles and a 35 km/h average. The test topic, Redis
+deployment, checkpoint, and Spark job were removed afterward. Reusable Phase 3
+manifests are in `infra/kubernetes/phase3/`, and `streaming/producer_test.py`
+provides a cluster-side test producer.
+
 To run its local Spark test, install the separate streaming dependencies and
 use a Java runtime supported by PySpark:
 

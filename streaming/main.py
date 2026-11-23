@@ -16,7 +16,11 @@ def main() -> None:
 
     spark = (
         SparkSession.builder.appName("geopulse-live-statistics")
+        .master("local[1]")
         .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "1")
+        .config("spark.driver.memory", "512m")
         .getOrCreate()
     )
     try:

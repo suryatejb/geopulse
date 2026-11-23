@@ -1,0 +1,21 @@
+FROM eclipse-temurin:21-jdk-noble
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    SPARK_HOME=/opt/venv/lib/python3.12/site-packages/pyspark \
+    PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /opt/geopulse
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv
+
+COPY streaming/requirements.txt ./streaming-requirements.txt
+RUN pip install --no-cache-dir -r streaming-requirements.txt "aiokafka>=0.12,<1"
+
+COPY app ./app
+COPY streaming ./streaming
+
+CMD ["python", "-m", "streaming.main"]
