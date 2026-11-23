@@ -289,6 +289,26 @@ The planned per-minute statistics will count distinct vehicles in each cell
 and average each vehicle's latest reported speed in that cell and minute, so
 a vehicle sending more pings does not get extra weight.
 
+The first Phase 3 building block is `streaming/aggregation.py`: it calculates
+each vehicle's latest speed for a one-minute UTC window and H3 cell, including
+for older pings without `h3_cell`. If timestamps tie, the greater sequence
+number wins; if those also tie, the greater speed wins deterministically.
+The calculation expects validated pings with a timestamp and sequence number.
+It is not yet a running Kafka-to-Redis pipeline. Redis retention is planned
+for 24 hours; checkpoint recovery and late-arrival handling still need
+end-to-end testing.
+
+To run its local Spark test, install the separate streaming dependencies and
+use a Java runtime supported by PySpark:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r .\streaming\requirements.txt
+.\.venv\Scripts\python.exe -m pytest -q .\tests\test_streaming_aggregation.py
+```
+
+On Windows, the streaming/checkpoint test is skipped because it needs native
+Hadoop libraries; run it on Linux to test that path.
+
 The API waits up to five seconds for Kafka. A timeout returns HTTP 503 with an
 unknown outcome: the ping may still be written after the response. Retrying
 could create a duplicate; producer idempotence only handles Kafka's internal
