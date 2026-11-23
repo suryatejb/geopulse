@@ -1,5 +1,6 @@
 h3>=4,<5
 fakeredis[lua]>=2.23,<3
 pyspark>=4.0,<4.1
+pydantic>=2.9,<3
 pytest>=8,<9
 redis>=5,<8

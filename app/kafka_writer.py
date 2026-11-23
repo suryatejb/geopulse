@@ -15,6 +15,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import ValidationError
 
 from app.models import PingCreate
+from app.ping_parser import parse_ping
 
 load_dotenv()
 
@@ -48,16 +49,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pings_vehicle_sequence
 ON pings (vehicle_id, sequence_number)
 WHERE sequence_number IS NOT NULL
 """
-
-
-def parse_ping(value: bytes | None) -> PingCreate:
-    if value is None:
-        raise ValueError("A Kafka ping must have a message value")
-    data = json.loads(value)
-    ping = PingCreate.model_validate(data)
-    if ping.sequence_number is None:
-        raise ValueError("A Kafka ping must include sequence_number")
-    return ping
 
 
 def initialize_database(pool: ConnectionPool) -> None:

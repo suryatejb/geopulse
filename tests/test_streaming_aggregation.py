@@ -1,4 +1,6 @@
-from datetime import datetime
+from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
+import base64
 import json
 import os
 import sys
@@ -7,12 +9,13 @@ import pytest
 
 pyspark = pytest.importorskip("pyspark")
 from pyspark.sql import SparkSession
+from pyspark.errors import StreamingQueryException
 
 from streaming.aggregation import latest_vehicle_speeds
 
 
 @pytest.fixture(scope="module")
-def spark() -> SparkSession:
+def spark() -> Iterator[SparkSession]:
     os.environ["PYSPARK_PYTHON"] = sys.executable
     session = (
         SparkSession.builder.master("local[1]")
@@ -129,3 +132,99 @@ def test_streaming_late_data_and_checkpoint_restart(
     results.clear()
     run_batch("04.json", [ping(5, "2026-01-01T10:00:55Z", 90.0)])
     assert not results
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Spark streaming checkpoints need Hadoop's native Windows libraries",
+)
+def test_streaming_to_redis_retries_and_recovers(spark: SparkSession, tmp_path) -> None:
+    redis_url = os.getenv("GEOPULSE_TEST_REDIS_URL")
+    if not redis_url:
+        pytest.skip("GEOPULSE_TEST_REDIS_URL must point to a dedicated test Redis")
+    redis = pytest.importorskip("redis")
+    from streaming.kafka_source import parse_kafka_records
+    from streaming.pipeline import live_stats_writer
+    from streaming.redis_sink import read_area_stats, stats_key
+
+    client = redis.Redis.from_url(redis_url)
+    minute = int(datetime.now(timezone.utc).timestamp()) // 60 * 60
+    cell = "882a107289fffff"
+    keys = [stats_key(cell, minute + offset) for offset in (0, 60, 180)]
+    assert not client.exists(*keys), "test key already exists"
+    source = tmp_path / "input"
+    source.mkdir()
+    checkpoint = tmp_path / "checkpoint"
+
+    def ping(vehicle: str, sequence: int, seconds: int, speed: float) -> dict:
+        timestamp = datetime.fromtimestamp(minute, timezone.utc) + timedelta(seconds=seconds)
+        return {
+            "vehicle_id": vehicle,
+            "sequence_number": sequence,
+            "latitude": 40.7128,
+            "longitude": -74.006,
+            "speed_kmh": speed,
+            "recorded_at": timestamp.isoformat(),
+        }
+
+    def run_batch(
+        filename: str | None, values: list[dict | bytes | None], url: str
+    ) -> None:
+        if filename is not None:
+            records = []
+            for offset, value in enumerate(values):
+                if isinstance(value, dict):
+                    value = json.dumps(value).encode()
+                records.append({
+                    "topic": "test-pings",
+                    "partition": 0,
+                    "offset": offset,
+                    "value": base64.b64encode(value).decode() if value is not None else None,
+                })
+            (source / filename).write_text(
+                "\n".join(json.dumps(record) for record in records), encoding="utf-8"
+            )
+        records = spark.readStream.schema(
+            "topic string, partition int, offset long, value binary"
+        ).option("maxFilesPerTrigger", 1).json(str(source))
+        pings = parse_kafka_records(records)
+        query = (
+            live_stats_writer(
+                pings, redis_url=url, checkpoint_location=str(checkpoint)
+            )
+            .trigger(availableNow=True)
+            .start()
+        )
+        try:
+            if not query.awaitTermination(60):
+                pytest.fail("Spark streaming query did not finish")
+        finally:
+            if query.isActive:
+                query.stop()
+
+    try:
+        run_batch("01.json", [
+            ping("a", 1, 10, 20.0),
+            ping("b", 1, 20, 10.0),
+            ping("a", 3, 70, 70.0),
+            b"\xff",
+            None,
+        ], redis_url)
+        assert read_area_stats(client, cell=cell, minute_start=minute) == (2, 15.0)
+
+        with pytest.raises(StreamingQueryException):
+            run_batch(
+                "02.json",
+                [ping("a", 2, 50, 60.0), ping("a", 4, 30, 100.0)],
+                "redis://127.0.0.1:1/0?socket_connect_timeout=1",
+            )
+        assert read_area_stats(client, cell=cell, minute_start=minute) == (2, 15.0)
+        run_batch(None, [], redis_url)
+        assert read_area_stats(client, cell=cell, minute_start=minute) == (2, 35.0)
+
+        run_batch("03.json", [ping("a", 5, 210, 80.0)], redis_url)
+        run_batch("04.json", [ping("a", 6, 55, 90.0)], redis_url)
+        assert read_area_stats(client, cell=cell, minute_start=minute) == (2, 35.0)
+    finally:
+        client.delete(*keys)
+        client.close()

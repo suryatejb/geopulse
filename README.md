@@ -284,8 +284,9 @@ New Kafka pings also include `h3_cell`, the H3 resolution 8 hexagon containing
 their latitude and longitude (about 0.7 km² on average). This prepares for
 Phase 3 area statistics; the database writer still accepts older Kafka pings
 without that field. Historical pings will need their cell calculated from their
-coordinates when they are processed. The Spark pipeline and Redis deployment
-are not yet implemented.
+coordinates when they are processed. A Kafka source for the Spark pipeline is
+implemented but has not yet been tested with a live broker; a Redis deployment
+is also not yet implemented.
 The planned per-minute statistics will count distinct vehicles in each cell
 and average each vehicle's latest reported speed in that cell and minute, so
 a vehicle sending more pings does not get extra weight.
@@ -295,27 +296,55 @@ each vehicle's latest speed for a one-minute UTC window and H3 cell, including
 for older pings without `h3_cell`. If timestamps tie, the greater sequence
 number wins; if those also tie, the greater speed wins deterministically.
 The calculation expects validated pings with a timestamp and sequence number.
-It is not yet a running Kafka-to-Redis pipeline; checkpoint recovery and
-late-arrival handling still need end-to-end testing.
+It is not yet a running Kafka-to-Redis pipeline.
+
+`streaming/main.py` reads `pings` from Kafka, starting at the earliest available
+offset for a new checkpoint. Set `REDIS_URL` and `SPARK_CHECKPOINT_LOCATION`;
+`KAFKA_BOOTSTRAP_SERVERS` and `KAFKA_TOPIC` may override the cluster bootstrap
+address and `pings` topic. The checkpoint must survive restarts. Deployments
+must supply the Spark Kafka connector matching their Spark version (for example,
+`org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.5` for Spark 4.0.5), along
+with the Python modules used by the job.
+
+Spark logs a warning with the source topic, partition, and offset and skips
+invalid messages so the live scoreboard can continue. The database writer
+independently sends messages it rejects to the DLQ; Spark does not wait for or
+guarantee that DLQ publication. Spark also skips messages without an explicit
+`recorded_at`, because using the current time would make replay inconsistent.
+The database writer currently accepts such messages and assigns a time, so
+they may be stored in PostgreSQL without appearing in live statistics or the
+DLQ.
 
 The separate `streaming/redis_sink.py` building block keeps a vehicle count
 and sum of latest vehicle speeds for each cell and minute, expiring them
 24 hours after the minute ends. Updates use an atomic Redis script so replayed
 or older observations do not inflate the count or overwrite a newer speed.
-The sink is not connected to Spark yet. Its tests passed against an isolated
-Redis 7.4.12 server with persistence disabled as well as a Redis emulator;
-Redis persistence and recovery have not been verified.
+`streaming/batch_sink.py` can write the Spark calculation's per-vehicle
+updates to Redis; `streaming/pipeline.py` connects it to a validated Spark
+stream and a checkpoint location. If a batch fails after some updates,
+restarting the query from the same checkpoint retries it; repeating those
+updates does not add extra vehicles or revert newer speeds. The sink tests
+passed against an isolated Redis 7.4.12 server with persistence disabled as
+well as a Redis emulator, and a simulated partial batch failure was tested
+against the emulator.
+
+On November 22, 2026, an isolated Linux test used a file stream, Spark 4.0.5,
+and Redis 7.4.12. It fed Kafka-shaped records, including invalid UTF-8 and a
+null value, through the parser and checked the vehicle count and average, a
+failed Redis connection followed by a checkpoint restart, and late data both
+within and beyond the watermark. This did not test a live Kafka source or
+Redis persistence.
 
 To run its local Spark test, install the separate streaming dependencies and
 use a Java runtime supported by PySpark:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r .\streaming\requirements.txt
-.\.venv\Scripts\python.exe -m pytest -q .\tests\test_streaming_aggregation.py .\tests\test_redis_sink.py
+.\.venv\Scripts\python.exe -m pytest -q .\tests\test_streaming_aggregation.py .\tests\test_redis_sink.py .\tests\test_streaming_batch_sink.py
 ```
 
-On Windows, the streaming/checkpoint test is skipped because it needs native
-Hadoop libraries; run it on Linux to test that path.
+On Windows, the streaming/checkpoint tests are skipped because they need
+native Hadoop libraries; run them on Linux to test those paths.
 To test the Redis sink against a dedicated real Redis instance instead of the
 emulator, set `GEOPULSE_TEST_REDIS_URL` to that instance's connection URL.
 
