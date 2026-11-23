@@ -32,6 +32,23 @@ def test_parse_ping_accepts_valid_kafka_message() -> None:
     assert ping.sequence_number == 7
 
 
+def test_parse_ping_accepts_message_with_h3_cell() -> None:
+    ping = parse_ping(
+        json.dumps(
+            {
+                "vehicle_id": "vehicle-00001",
+                "sequence_number": 7,
+                "latitude": 40.7128,
+                "longitude": -74.006,
+                "speed_kmh": 32.5,
+                "h3_cell": "882a107289fffff",
+            }
+        ).encode()
+    )
+    assert ping.vehicle_id == "vehicle-00001"
+    assert ping.sequence_number == 7
+
+
 @pytest.mark.parametrize(
     "value",
     [

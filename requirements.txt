@@ -1,4 +1,5 @@
 fastapi>=0.115,<1
+h3>=4,<5
 uvicorn[standard]>=0.30,<1
 aiokafka>=0.12,<1
 psycopg[binary,pool]>=3.2,<4

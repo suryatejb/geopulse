@@ -280,6 +280,15 @@ writer consumes it and stores it in PostgreSQL. Run the deployment script
 without `-IngestionMode kafka` to restore the PostgreSQL baseline and remove
 the writer.
 
+New Kafka pings also include `h3_cell`, the H3 resolution 8 hexagon containing
+their latitude and longitude (about 0.7 km² on average). This prepares for
+Phase 3 area statistics; the database writer still accepts older Kafka pings
+without that field. Historical pings will need their cell calculated from their
+coordinates when they are processed. Spark and Redis are not yet implemented.
+The planned per-minute statistics will count distinct vehicles in each cell
+and average each vehicle's latest reported speed in that cell and minute, so
+a vehicle sending more pings does not get extra weight.
+
 The API waits up to five seconds for Kafka. A timeout returns HTTP 503 with an
 unknown outcome: the ping may still be written after the response. Retrying
 could create a duplicate; producer idempotence only handles Kafka's internal

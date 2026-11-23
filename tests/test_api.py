@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -197,7 +198,9 @@ def test_kafka_mode_returns_success_only_after_publishing_ping(
         message = app.state.kafka_producer.messages[0]
         assert message["topic"] == "pings"
         assert message["key"] == b"vehicle-00042"
-        assert '"sequence_number":7' in message["value"].decode("utf-8")
+        payload = json.loads(message["value"])
+        assert payload["sequence_number"] == 7
+        assert payload["h3_cell"] == "882a107289fffff"
         assert app.state.pool.pings == []
 
     asyncio.run(exercise_api())

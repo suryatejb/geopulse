@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
+import h3
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaError
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 KAFKA_PUBLISH_TIMEOUT_SECONDS = 5.0
+H3_RESOLUTION = 8
 
 CREATE_PINGS_TABLE = """
 CREATE TABLE IF NOT EXISTS pings (
@@ -147,6 +149,10 @@ def create_app() -> FastAPI:
                     status_code=422,
                     detail="sequence_number is required for Kafka ingestion.",
                 )
+            kafka_ping = ping.model_dump(mode="json")
+            kafka_ping["h3_cell"] = h3.latlng_to_cell(
+                ping.latitude, ping.longitude, H3_RESOLUTION
+            )
             kafka_send_started_at = time.perf_counter()
             try:
                 await asyncio.wait_for(
@@ -154,7 +160,7 @@ def create_app() -> FastAPI:
                         "pings",
                         key=ping.vehicle_id.encode("utf-8"),
                         value=json.dumps(
-                            ping.model_dump(mode="json"),
+                            kafka_ping,
                             separators=(",", ":"),
                         ).encode("utf-8"),
                     ),
