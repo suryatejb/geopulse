@@ -284,7 +284,8 @@ New Kafka pings also include `h3_cell`, the H3 resolution 8 hexagon containing
 their latitude and longitude (about 0.7 km² on average). This prepares for
 Phase 3 area statistics; the database writer still accepts older Kafka pings
 without that field. Historical pings will need their cell calculated from their
-coordinates when they are processed. Spark and Redis are not yet implemented.
+coordinates when they are processed. The Spark pipeline and Redis deployment
+are not yet implemented.
 The planned per-minute statistics will count distinct vehicles in each cell
 and average each vehicle's latest reported speed in that cell and minute, so
 a vehicle sending more pings does not get extra weight.
@@ -294,20 +295,29 @@ each vehicle's latest speed for a one-minute UTC window and H3 cell, including
 for older pings without `h3_cell`. If timestamps tie, the greater sequence
 number wins; if those also tie, the greater speed wins deterministically.
 The calculation expects validated pings with a timestamp and sequence number.
-It is not yet a running Kafka-to-Redis pipeline. Redis retention is planned
-for 24 hours; checkpoint recovery and late-arrival handling still need
-end-to-end testing.
+It is not yet a running Kafka-to-Redis pipeline; checkpoint recovery and
+late-arrival handling still need end-to-end testing.
+
+The separate `streaming/redis_sink.py` building block keeps a vehicle count
+and sum of latest vehicle speeds for each cell and minute, expiring them
+24 hours after the minute ends. Updates use an atomic Redis script so replayed
+or older observations do not inflate the count or overwrite a newer speed.
+The sink is not connected to Spark yet. Its tests passed against an isolated
+Redis 7.4.12 server with persistence disabled as well as a Redis emulator;
+Redis persistence and recovery have not been verified.
 
 To run its local Spark test, install the separate streaming dependencies and
 use a Java runtime supported by PySpark:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r .\streaming\requirements.txt
-.\.venv\Scripts\python.exe -m pytest -q .\tests\test_streaming_aggregation.py
+.\.venv\Scripts\python.exe -m pytest -q .\tests\test_streaming_aggregation.py .\tests\test_redis_sink.py
 ```
 
 On Windows, the streaming/checkpoint test is skipped because it needs native
 Hadoop libraries; run it on Linux to test that path.
+To test the Redis sink against a dedicated real Redis instance instead of the
+emulator, set `GEOPULSE_TEST_REDIS_URL` to that instance's connection URL.
 
 The API waits up to five seconds for Kafka. A timeout returns HTTP 503 with an
 unknown outcome: the ping may still be written after the response. Retrying
