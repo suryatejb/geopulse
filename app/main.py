@@ -295,6 +295,29 @@ def create_app() -> FastAPI:
 
         return await run_in_threadpool(save_ping)
 
+    @app.get(
+        "/api/v1/vehicles/{vehicle_id}/pings",
+        response_model=list[PingResponse],
+    )
+    def list_vehicle_pings(
+        request: Request,
+        vehicle_id: str,
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> list[dict]:
+        with request.app.state.pool.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, vehicle_id, sequence_number, latitude, longitude,
+                       speed_kmh, recorded_at, received_at
+                FROM pings
+                WHERE vehicle_id = %s
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT %s
+                """,
+                (vehicle_id, limit),
+            ).fetchall()
+        return rows
+
     @app.get("/api/v1/pings/count", response_model=PingCount)
     def count_pings(request: Request) -> dict[str, int]:
         with request.app.state.pool.connection() as connection:

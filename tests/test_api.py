@@ -13,11 +13,16 @@ from app.main import create_app
 
 
 class FakeCursor:
-    def __init__(self, row: dict[str, Any] | None) -> None:
+    def __init__(self, row: dict[str, Any] | list[dict[str, Any]] | None) -> None:
         self.row = row
 
     def fetchone(self) -> dict[str, Any] | None:
-        return self.row
+        return self.row if isinstance(self.row, dict) else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        if isinstance(self.row, list):
+            return self.row
+        return []
 
 
 class FakeConnection:
@@ -47,6 +52,14 @@ class FakeConnection:
             }
             self.pool.pings.append(row)
             return FakeCursor(row)
+        if "ORDER BY recorded_at DESC, id DESC" in query:
+            assert parameters is not None
+            vehicle_pings = sorted(
+                (ping for ping in self.pool.pings if ping["vehicle_id"] == parameters[0]),
+                key=lambda ping: (ping["recorded_at"], ping["id"]),
+                reverse=True,
+            )
+            return FakeCursor(vehicle_pings[:parameters[1]])
         if query.strip().startswith("SELECT id, vehicle_id"):
             assert parameters is not None
             return FakeCursor(next(
@@ -135,6 +148,58 @@ def test_ping_api_saves_valid_request_and_reports_count() -> None:
                 },
             )
             assert invalid_response.status_code == 422
+
+    asyncio.run(exercise_api())
+
+
+def test_vehicle_pings_endpoint_returns_newest_records_with_a_limit() -> None:
+    app = create_app()
+    app.state.pool = FakePool()
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            for sequence_number, second in [(1, 1), (2, 2), (3, 3)]:
+                response = await client.post(
+                    "/api/v1/pings",
+                    json={
+                        "vehicle_id": "vehicle-00042",
+                        "sequence_number": sequence_number,
+                        "latitude": 40.7128,
+                        "longitude": -74.006,
+                        "speed_kmh": 20 + sequence_number,
+                        "recorded_at": f"2026-11-23T12:00:0{second}+00:00",
+                    },
+                )
+                assert response.status_code == 201
+
+            response = await client.post(
+                "/api/v1/pings",
+                json={
+                    "vehicle_id": "vehicle-00043",
+                    "sequence_number": 1,
+                    "latitude": 40.7128,
+                    "longitude": -74.006,
+                    "speed_kmh": 24,
+                    "recorded_at": "2026-11-23T12:00:04+00:00",
+                },
+            )
+            assert response.status_code == 201
+
+            response = await client.get(
+                "/api/v1/vehicles/vehicle-00042/pings",
+                params={"limit": 2},
+            )
+            invalid_limit_response = await client.get(
+                "/api/v1/vehicles/vehicle-00042/pings",
+                params={"limit": 1001},
+            )
+        assert response.status_code == 200
+        assert [ping["sequence_number"] for ping in response.json()] == [3, 2]
+        assert invalid_limit_response.status_code == 422
 
     asyncio.run(exercise_api())
 

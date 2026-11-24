@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geopulse-citus-bootstrap
+  namespace: geopulse
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: citusdata/citus:14.2.0-pg17
+          imagePullPolicy: IfNotPresent
+          command:
+            - psql
+            - --set=ON_ERROR_STOP=1
+            - --host=geopulse-citus-coordinator
+            - --username=$(POSTGRES_USER)
+            - --dbname=$(POSTGRES_DB)
+            - --file=/bootstrap/bootstrap.sql
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-citus-database
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-citus-database
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-citus-database
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /bootstrap
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: geopulse-citus-bootstrap

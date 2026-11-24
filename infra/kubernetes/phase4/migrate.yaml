@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geopulse-citus-migrate
+  namespace: geopulse
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: citusdata/citus:14.2.0-pg17
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ceu
+          args:
+            - |
+              set -o pipefail
+              export PGUSER="$POSTGRES_USER"
+              export PGPASSWORD
+
+              completed_rows="$(psql --host=geopulse-citus-coordinator \
+                --dbname="$POSTGRES_DB" --tuples-only --no-align \
+                --command="SELECT source_rows FROM public.phase4_migration_state WHERE migration_key = 'baseline-pings'")"
+              if [ -n "$completed_rows" ]; then
+                echo "Baseline pings were already migrated ($completed_rows rows)."
+                exit 0
+              fi
+
+              target_rows="$(psql --host=geopulse-citus-coordinator \
+                --dbname="$POSTGRES_DB" --tuples-only --no-align \
+                --command="SELECT COUNT(*) FROM public.pings")"
+              if [ "$target_rows" -ne 0 ]; then
+                echo "Citus already has pings but no migration marker; refusing to overwrite." >&2
+                exit 1
+              fi
+
+              source_rows="$(psql --host=postgres.geopulse.svc.cluster.local \
+                --dbname="$POSTGRES_DB" --tuples-only --no-align \
+                --command="SELECT COUNT(*) FROM public.pings")"
+              {
+                pg_dump --host=postgres.geopulse.svc.cluster.local \
+                  --dbname="$POSTGRES_DB" --username="$POSTGRES_USER" \
+                  --data-only --table=public.pings --no-owner --no-acl
+                printf "SELECT 1 / CASE WHEN (SELECT COUNT(*) FROM public.pings) = %s THEN 1 ELSE 0 END;\\n" "$source_rows"
+                printf "INSERT INTO public.phase4_migration_state (migration_key, source_rows) VALUES ('baseline-pings', %s);\\n" "$source_rows"
+              } | psql --host=geopulse-citus-coordinator --dbname="$POSTGRES_DB" \
+                  --username="$POSTGRES_USER" --set=ON_ERROR_STOP=1 --single-transaction
+              echo "Migrated $source_rows pings from the PostgreSQL baseline."
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-citus-database
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-citus-database
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geopulse-citus-database
+                  key: POSTGRES_PASSWORD
