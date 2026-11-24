@@ -224,7 +224,7 @@ Limits of this test: the load generator runs on the same laptop and the same
 cluster as the system under test, and both share about 6.8 GiB of memory. Each
 rate was measured once.
 
-## Phase 2: Kafka (in progress)
+## Phase 2: Kafka
 
 Kafka is a waiting line for messages. The API can publish each ping to Kafka
 instead of writing it straight to the database. The API uses the vehicle ID as
@@ -456,6 +456,9 @@ test includes sequence numbers and different vehicle IDs, and the database
 schema and software have changed since the baseline, so the comparison is
 indicative rather than a controlled like-for-like experiment.
 
+Regenerate the README chart from the repository root with
+`python docs/plot_benchmark_chart.py`.
+
 The writer lagged during each Kafka run; the database row-count changes
 measured during the runs (10,661, 12,517 and 12,826 respectively) can include
 earlier backlog and are not per-run delivery counts. After the runs, the
@@ -473,6 +476,22 @@ same laptop; monitoring remained off.
 The simulator currently generates sample coordinates inside a small New York
 area. It does not follow actual roads yet; OpenStreetMap road routes can come
 later.
+
+## Phase 3: Live statistics
+
+The Spark Structured Streaming job reads validated pings from Kafka, derives an
+H3 cell from each ping's coordinates, and groups by one-minute event-time
+windows, cell, and vehicle. It uses a one-minute watermark for late data and
+selects each vehicle's latest speed for the window. `foreachBatch` writes these
+updates to Redis, where atomic Lua updates maintain the vehicle count and speed
+sum for each cell and minute.
+
+The Spark query uses a persistent checkpoint so it can resume Kafka offsets
+after a driver restart. The November 23, 2026 recovery test verified that Redis
+data survived a Redis pod restart and that Spark resumed from its checkpoint
+and ingested a new batch. Recovery from node or cluster loss has not been
+tested. See the [implementation](../streaming/aggregation.py) and
+[recovery test](../infra/kubernetes/phase3/test-recovery.ps1).
 
 ## Phase 4: Sharding with Citus
 
