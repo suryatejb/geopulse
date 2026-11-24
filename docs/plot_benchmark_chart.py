@@ -112,10 +112,10 @@ def render_chart() -> str:
 
     elements.extend(
         [
-            '<line x1="615" y1="65" x2="645" y2="65" class="baseline" stroke-width="3"/>',
-            '<text x="653" y="70" class="legend">PostgreSQL baseline</text>',
-            '<line x1="615" y1="88" x2="645" y2="88" class="kafka" stroke-width="3"/>',
-            '<text x="653" y="93" class="legend">Kafka</text>',
+            '<line x1="150" y1="65" x2="180" y2="65" class="baseline" stroke-width="3"/>',
+            '<text x="188" y="70" class="legend">PostgreSQL baseline</text>',
+            '<line x1="150" y1="88" x2="180" y2="88" class="kafka" stroke-width="3"/>',
+            '<text x="188" y="93" class="legend">Kafka</text>',
             "</svg>",
             "",
         ]
