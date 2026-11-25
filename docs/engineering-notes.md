@@ -504,7 +504,7 @@ results from the workers.
 The Phase 4 deployment uses the pinned `citusdata/citus:14.2.0-pg17` image.
 It creates a separate Citus cluster, copies the existing PostgreSQL pings
 without deleting the original database, and then points the API at Citus. The
-API is briefly stopped during the copy so new pings cannot be missed. The old
+API is briefly stopped during the copy to pause its writes. The old
 PostgreSQL database remains available for rollback. This image is for the
 local learning cluster, not a production deployment.
 
@@ -517,8 +517,18 @@ With the API in PostgreSQL mode and at least 2.25 GiB of free host memory, run:
 The script registers both workers, creates a distributed `pings` table, copies
 the baseline rows, switches the API over, and verifies the API can connect to
 Citus. It records a migration marker so rerunning the script does not copy the
-same baseline rows again. To provision and migrate Citus while keeping the API
-on the original PostgreSQL database, use `-SkipApiCutover`.
+same baseline rows again, and checks the full ordered ping data in both
+databases before reusing that marker. If the data differs, it refuses to
+cut over; there is no automated merge or reverse migration. To provision and
+migrate Citus while keeping the API on the original PostgreSQL database, use
+`-SkipApiCutover`.
+
+The script requires direct PostgreSQL ingestion and no Kafka writer deployment.
+Stop any other clients writing to either database before migration or rollback,
+and keep them stopped until the switch completes; the scripts cannot quiesce
+external clients. Kafka mode still writes to the original PostgreSQL database,
+not Citus. The Phase 1 deployment script refuses to switch away from Citus;
+use the guarded rollback first.
 
 The API route
 `/api/v1/vehicles/{vehicle_id}/pings?limit=100` demonstrates a query that can
@@ -530,12 +540,27 @@ To switch the API back to the original database:
 .\infra\kubernetes\phase4\rollback.ps1
 ```
 
-Rollback preserves both databases. If new pings have been written to Citus
-since cutover, the script refuses to switch automatically because those newer
-rows are not copied back to the original PostgreSQL database. Only use
-`-AllowDataLoss` when intentionally accepting that loss. The Citus and original
+Rollback pauses the API and compares the full ping data in both databases. It
+preserves both databases and refuses to switch when they differ, because changes
+are not copied back to the original PostgreSQL database. Only use
+`-AllowDataLoss` when intentionally accepting that the original database will
+not contain Citus-only changes. Reconcile or back up divergent data separately
+before switching; there is no automated reverse migration. The Citus and original
 PostgreSQL PVCs are separate; deleting either cluster's PVCs permanently
 deletes that cluster's data.
+
+### Local validation
+
+The live migration copied 242,274 pings; ordered binary exports of all ping
+columns matched by SHA-256. The 32 shards had 16 placements on each worker,
+and an `EXPLAIN` of a vehicle-keyed query showed one task. An isolated API
+canary verified health, the route endpoint, a new ping and a duplicate retry
+returning the same ID. A rollback with an extra Citus ping was refused and the
+API recovered on Citus; after removing that isolated ping, rollback succeeded.
+An extra baseline ping also caused the migration-marker check to refuse reuse.
+After cleaning up that test ping, cutover to Citus succeeded again. These checks
+do not establish performance, availability under worker failure, or Kafka-to-
+Citus integration.
 
 ## Set up on Windows
 

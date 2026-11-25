@@ -15,6 +15,7 @@ if (-not (Test-Path -LiteralPath $kubeconfig)) {
 }
 $env:KUBECONFIG = $kubeconfig
 
+$apiImage = 'geopulse-api:0.4.0'
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $env:Path = "$userPath;$machinePath"
@@ -57,6 +58,9 @@ $originalDatabaseSecret = ($apiContainer.env |
 $apiReplicas = [int]$apiDeployment.spec.replicas
 if ($apiIngestionMode -ne 'postgres') {
     throw 'Restore PostgreSQL ingestion mode before deploying Phase 4.'
+}
+if ($originalDatabaseSecret -notin @('geopulse-database', 'geopulse-citus-database')) {
+    throw 'The API is not using a recognized PostgreSQL or Citus database secret.'
 }
 if ($SkipApiCutover -and $originalDatabaseSecret -eq 'geopulse-citus-database') {
     throw 'The API is already on Citus; -SkipApiCutover cannot switch it back to PostgreSQL.'
@@ -113,6 +117,22 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Variable sourceSecretJson, sourceSecret, databaseName, databaseUser,
     databasePassword, databaseUrl, secretData, citusSecret
 
+if (-not $SkipApiCutover) {
+    Push-Location $repoRoot
+    try {
+        docker build --tag $apiImage .
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to build the Phase 4 API image.'
+        }
+    } finally {
+        Pop-Location
+    }
+    kind load docker-image $apiImage --name geopulse
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to load the Phase 4 API image into kind.'
+    }
+}
+
 docker pull $image
 if ($LASTEXITCODE -ne 0) {
     throw 'Failed to pull the pinned Citus image.'
@@ -160,6 +180,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $apiPaused = $false
+$cutoverAttempted = $false
 try {
     kubectl -n $namespace scale deployment/geopulse-api --replicas=0
     if ($LASTEXITCODE -ne 0) {
@@ -191,6 +212,7 @@ try {
             throw 'Failed to restore the baseline PostgreSQL API configuration.'
         }
     } else {
+        $cutoverAttempted = $true
         kubectl apply -f (Join-Path $PSScriptRoot 'api-citus.yaml')
         if ($LASTEXITCODE -ne 0) {
             throw 'Failed to point the API at the Citus coordinator.'
@@ -214,6 +236,11 @@ try {
     $apiPaused = $false
 } catch {
     $deploymentError = $_
+    if ($cutoverAttempted -and $originalDatabaseSecret -ne 'geopulse-citus-database') {
+        throw ("Phase 4 failed after Citus cutover began. The API configuration was not " +
+            "automatically switched back because it may have accepted Citus writes. " +
+            "Inspect the API and use rollback.ps1 after checking the data. Original error: $deploymentError")
+    }
     if ($apiPaused) {
         if ($originalDatabaseSecret -eq 'geopulse-citus-database') {
             kubectl apply -f (Join-Path $PSScriptRoot 'api-citus.yaml')

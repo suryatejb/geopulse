@@ -2,7 +2,7 @@
 
 GeoPulse is a real-time vehicle-tracking data platform designed to simulate up to 10,000 vehicles
 (~600k pings/min); Kafka ingestion has been tested at up to 700 pings/s. It runs locally on Kubernetes
-with Spark Structured Streaming live statistics and a sharded PostgreSQL (Citus) storage path in progress.
+with Spark Structured Streaming live statistics and sharded PostgreSQL (Citus) storage.
 
 ## Architecture
 
@@ -13,13 +13,16 @@ flowchart LR
     K --> SP[Spark Streaming] --> R[Redis]
     K --> W[Database writer]
     W --> DLQ[Kafka: DLQ]
-    W -. "Phase 4 in progress" .-> C[Citus coordinator]
+    W --> P[PostgreSQL baseline]
+    A -. "direct-write baseline mode" .-> P
+    A -. "direct-write Citus mode" .-> C[Citus coordinator]
     C --> C1[Worker 1]
     C --> C2[Worker 2]
 ```
 
 The API defaults to direct PostgreSQL writes; after deploying Kafka, enable it with
-`.\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka`. Citus cutover is not yet validated.
+`.\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka`. Citus currently supports
+direct API writes; the Kafka writer still targets the baseline database.
 See the [Kafka](docs/engineering-notes.md#phase-2-kafka) and
 [Citus](docs/engineering-notes.md#phase-4-sharding-with-citus) notes.
 
@@ -118,8 +121,9 @@ and Spark resumed from its checkpoint to ingest a new batch. A dashboard shows t
 
 ## Phase 4: Citus sharding
 
-The prepared Citus setup distributes pings by vehicle ID across a coordinator and two workers, with
-migration and rollback scripts. It has not yet been deployed or measured live.
+The Citus setup distributes pings by vehicle ID across a coordinator and two workers. A local
+migration, direct API writes, duplicate handling, and guarded rollback were verified; Kafka writer
+integration with Citus and Citus load testing remain future work.
 [Citus details](docs/engineering-notes.md#phase-4-sharding-with-citus).
 
 ## Limitations

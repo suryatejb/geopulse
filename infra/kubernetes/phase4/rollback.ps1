@@ -11,33 +11,88 @@ if (-not (Test-Path -LiteralPath $kubeconfig)) {
 }
 $env:KUBECONFIG = $kubeconfig
 
-$migrationRows = & kubectl -n geopulse exec geopulse-citus-coordinator-0 -- psql `
-    -U geopulse -d geopulse -Atc `
-    "SELECT source_rows FROM public.phase4_migration_state WHERE migration_key = 'baseline-pings'"
-if ($LASTEXITCODE -ne 0 -or -not $migrationRows) {
-    throw 'Could not verify the baseline-to-Citus migration marker.'
-}
-$citusRows = & kubectl -n geopulse exec geopulse-citus-coordinator-0 -- psql `
-    -U geopulse -d geopulse -Atc "SELECT COUNT(*) FROM public.pings"
+$deploymentJson = & kubectl -n geopulse get deployment geopulse-api -o json
 if ($LASTEXITCODE -ne 0) {
-    throw 'Could not count pings in Citus before rollback.'
+    throw 'Could not inspect the API deployment.'
 }
-if ([long]$citusRows -gt [long]$migrationRows -and -not $AllowDataLoss) {
-    throw ("Citus contains {0} rows beyond the {1} migrated baseline rows. " +
-        'Use -AllowDataLoss only if you intentionally accept losing those newer rows.')
+$deployment = $deploymentJson | ConvertFrom-Json
+$api = $deployment.spec.template.spec.containers | Where-Object { $_.name -eq 'api' }
+$databaseSecret = ($api.env | Where-Object { $_.name -eq 'DATABASE_URL' }).valueFrom.secretKeyRef.name
+$replicas = [int]$deployment.spec.replicas
+if ($databaseSecret -ne 'geopulse-citus-database') {
+    throw 'The API is not configured to use Citus; refusing rollback.'
+}
+$writer = & kubectl -n geopulse get deployment geopulse-kafka-writer --ignore-not-found -o name
+if ($LASTEXITCODE -ne 0 -or $writer) {
+    throw 'Could not verify that the Kafka writer is stopped; refusing rollback.'
 }
 
-kubectl apply -f (Join-Path $repoRoot 'infra\kubernetes\phase1\api.yaml')
-if ($LASTEXITCODE -ne 0) {
-    throw 'Failed to restore the baseline PostgreSQL API configuration.'
-}
-kubectl -n geopulse delete deployment geopulse-kafka-writer --ignore-not-found
-if ($LASTEXITCODE -ne 0) {
-    throw 'Failed to stop the Kafka writer while restoring baseline mode.'
-}
-kubectl -n geopulse rollout status deployment/geopulse-api --timeout=180s
-if ($LASTEXITCODE -ne 0) {
-    throw 'The API did not return to the PostgreSQL baseline.'
+$paused = $false
+$baselineApplied = $false
+try {
+    kubectl -n geopulse scale deployment/geopulse-api --replicas=0
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to pause API writes before rollback.'
+    }
+    $paused = $true
+    kubectl -n geopulse wait --for=delete pod -l app=geopulse-api --timeout=120s
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The API did not stop before rollback.'
+    }
+
+    $compareScript = @'
+set -euo pipefail
+export PGUSER="$POSTGRES_USER"
+sql='COPY (SELECT id, vehicle_id, sequence_number, latitude, longitude, speed_kmh, recorded_at, received_at FROM public.pings ORDER BY id, vehicle_id) TO STDOUT WITH (FORMAT binary)'
+psql -h postgres.geopulse.svc.cluster.local -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "$sql" | sha256sum
+psql -h geopulse-citus-coordinator -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "$sql" | sha256sum
+printf '\n'
+'@
+    $compareScript = $compareScript.Replace("`r", '')
+    $output = $compareScript | & kubectl -n geopulse exec -i geopulse-citus-coordinator-0 -- bash
+    $hashes = @($output | Where-Object { $_.Trim() -ne '' })
+    if ($LASTEXITCODE -ne 0 -or $hashes.Count -ne 2 -or
+        $hashes[0] -notmatch '^[0-9a-f]{64}  -$' -or
+        $hashes[1] -notmatch '^[0-9a-f]{64}  -$') {
+        throw 'Could not compare PostgreSQL and Citus data before rollback.'
+    }
+    if ($hashes[0] -ne $hashes[1] -and -not $AllowDataLoss) {
+        throw ('PostgreSQL and Citus contain different pings. Use -AllowDataLoss only ' +
+            'if you intentionally accept leaving Citus changes behind.')
+    }
+
+    $baselineApplied = $true
+    kubectl apply -f (Join-Path $repoRoot 'infra\kubernetes\phase1\api.yaml')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to restore the baseline PostgreSQL API configuration.'
+    }
+    kubectl -n geopulse scale deployment/geopulse-api "--replicas=$replicas"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to restore the API replica count.'
+    }
+    kubectl -n geopulse rollout status deployment/geopulse-api --timeout=180s
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The API did not return to the PostgreSQL baseline.'
+    }
+    $paused = $false
+} catch {
+    $rollbackError = $_
+    if ($baselineApplied) {
+        throw ("Rollback failed after the baseline switch began. The API configuration " +
+            "was not automatically switched back because it may have accepted writes. " +
+            "Inspect both databases and the deployment. Original error: $rollbackError")
+    }
+    if ($paused) {
+        kubectl -n geopulse scale deployment/geopulse-api "--replicas=$replicas"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Rollback failed and the Citus API could not be restarted. Original error: $rollbackError"
+        }
+        kubectl -n geopulse rollout status deployment/geopulse-api --timeout=180s
+        if ($LASTEXITCODE -ne 0) {
+            throw "Rollback failed and the Citus API did not recover. Original error: $rollbackError"
+        }
+    }
+    throw $rollbackError
 }
 
 Write-Output 'The API now uses the original PostgreSQL database. The Citus cluster and its data were preserved.'

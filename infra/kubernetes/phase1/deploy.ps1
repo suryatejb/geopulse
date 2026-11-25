@@ -87,6 +87,21 @@ if ($LASTEXITCODE -ne 0 -or @($readyNodes).Count -ne 3) {
     throw 'Expected exactly three reachable kind nodes.'
 }
 
+$existingApiJson = & $kubectl -n $namespace get deployment geopulse-api --ignore-not-found -o json
+if ($LASTEXITCODE -ne 0) {
+    throw 'Could not inspect the existing API deployment before restoring baseline mode.'
+}
+if ($existingApiJson) {
+    $existingApi = $existingApiJson | ConvertFrom-Json
+    $existingApiContainer = $existingApi.spec.template.spec.containers |
+        Where-Object { $_.name -eq 'api' }
+    $existingDatabaseSecret = ($existingApiContainer.env |
+        Where-Object { $_.name -eq 'DATABASE_URL' }).valueFrom.secretKeyRef.name
+    if ($existingDatabaseSecret -eq 'geopulse-citus-database') {
+        throw 'The API is using Citus. Run phase4\rollback.ps1 before deploying the PostgreSQL baseline or Kafka mode.'
+    }
+}
+
 & $kubectl create namespace $namespace --dry-run=client -o yaml | & $kubectl apply -f -
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to create namespace '$namespace'."

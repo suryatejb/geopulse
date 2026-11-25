@@ -25,7 +25,16 @@ spec:
                 --dbname="$POSTGRES_DB" --tuples-only --no-align \
                 --command="SELECT source_rows FROM public.phase4_migration_state WHERE migration_key = 'baseline-pings'")"
               if [ -n "$completed_rows" ]; then
-                echo "Baseline pings were already migrated ($completed_rows rows)."
+                copy_sql="COPY (SELECT id, vehicle_id, sequence_number, latitude, longitude, speed_kmh, recorded_at, received_at FROM public.pings ORDER BY id, vehicle_id) TO STDOUT WITH (FORMAT binary)"
+                source_hash="$(psql --host=postgres.geopulse.svc.cluster.local \
+                  --dbname="$POSTGRES_DB" --set=ON_ERROR_STOP=1 --command="$copy_sql" | sha256sum)"
+                target_hash="$(psql --host=geopulse-citus-coordinator \
+                  --dbname="$POSTGRES_DB" --set=ON_ERROR_STOP=1 --command="$copy_sql" | sha256sum)"
+                if [ "$source_hash" != "$target_hash" ]; then
+                  echo "Baseline and Citus data differ; refusing to reuse the migration marker." >&2
+                  exit 1
+                fi
+                echo "Baseline pings were already migrated ($completed_rows rows); data matches."
                 exit 0
               fi
 
