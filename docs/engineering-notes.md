@@ -609,6 +609,51 @@ coordinator and worker CPU for Citus. A 5-second smoke run at a target of
 its uniquely identified rows were removed afterward. This validates the
 runner's Citus path, not Citus capacity or Kafka delivery at higher rates.
 
+### Citus load and query measurements
+
+On November 25, 2026, three single 30-second k6 runs targeted the direct-write
+Citus API. Spark was paused, while Kafka, Citus, Redis and the original
+PostgreSQL database remained running. The generator and system under test
+shared one laptop. "Achieved" is k6's request rate over the run including the
+completion tail; "stored" is the row-count change measured just after the run.
+
+| Target pings/s | Requests | Accepted | Achieved/s | HTTP failed | Dropped iterations | p95 ms | Stored |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 250 | 7,501 | 7,501 | 250 | 0% | 0 | 12.9 | 7,501 |
+| 500 | 14,985 | 14,985 | 497.1 | 0% | 16 | 109.6 | 14,985 |
+| 600 | 15,708 | 14,488 | 396 | 7.77% | 2,293 | 9,684.4 | 15,237 |
+
+At 600/s, the stored count exceeded acknowledged requests: a client timeout or
+failure does not prove a write failed. The 500/s run dropped iterations, so it
+was not a clean 500/s run even though the submitted requests succeeded. Each
+run used a unique vehicle prefix; those test rows were removed afterward.
+
+Separately, an isolated six-partition topic, API and writer used the same
+30-second k6 workload with Citus at a 500/s target. k6 reported 15,001
+requests, 15,001 acknowledgments, no failed requests or dropped iterations,
+and 7.3 ms p95 HTTP latency. The writer initially had 7,902 offsets remaining
+when checked after the run, then reached zero; Citus held 15,001 rows for that
+test prefix after draining. Matching counts do not by themselves prove
+per-ping delivery. The isolated topic, group, pods and rows were removed.
+
+For query comparison, a Python client in the API pod used one database
+connection, interleaved 20 timed samples per query after three warm-ups, and
+measured elapsed time through fetching results. `EXPLAIN` showed one task for
+the route query for a vehicle with 121 pings, returning the latest 100, versus
+32 tasks for a count over all 242,274 pings.
+
+| Query | Tasks | Median | p95 |
+|---|---:|---:|---:|
+| Vehicle route, limit 100 | 1 | 0.981 ms | 1.490 ms |
+| Count all pings | 32 | 6.752 ms | 8.301 ms |
+
+These are different queries returning different amounts of data, not an
+isolated measurement of sharding overhead or HTTP endpoint latency. The
+single local runs are not production capacity claims; the direct and Kafka
+runs also used separate API pods and topics, so they are not controlled
+like-for-like comparisons. Higher rates, repetitions, sustained backlog and
+worker-failure behavior remain untested.
+
 ## Set up on Windows
 
 This phase uses Python 3.11+ and a local PostgreSQL server. Docker is not

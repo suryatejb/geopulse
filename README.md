@@ -58,7 +58,7 @@ and [Kafka comparison](docs/engineering-notes.md#kafka-comparison-november-21-20
 | 1 | Simulator, API, PostgreSQL baseline | Done |
 | 2 | Kafka ingestion and database writer | Done |
 | 3 | Streaming area statistics and dashboard | Done |
-| 4 | Citus sharding and migration | In progress |
+| 4 | Citus sharding and migration | Done |
 | 5 | Backlog-based autoscaling and infrastructure as code | Planned |
 | 6 | Alerts, tracing, and failure testing | Planned |
 | 7 | Data lake and batch analytics | Planned |
@@ -124,7 +124,8 @@ and Spark resumed from its checkpoint to ingest a new batch. A dashboard shows t
 
 The Citus setup distributes pings by vehicle ID across a coordinator and two workers. Local checks
 verified migration, direct writes, Kafka-to-Citus writes, duplicate handling, and guarded rollback.
-A small load-test smoke check passed; higher-rate Citus performance testing remains.
+In one 500-pings/s Kafka-to-Citus run, all 15,001 requests were acknowledged and the writer later
+drained; query measurements compared one-shard and cross-shard operations.
 [Citus details](docs/engineering-notes.md#phase-4-sharding-with-citus).
 
 ## Limitations
