@@ -14,15 +14,16 @@ flowchart LR
     K --> W[Database writer]
     W --> DLQ[Kafka: DLQ]
     W --> P[PostgreSQL baseline]
+    W -. "Citus mode" .-> C[Citus coordinator]
     A -. "direct-write baseline mode" .-> P
-    A -. "direct-write Citus mode" .-> C[Citus coordinator]
+    A -. "direct-write Citus mode" .-> C
     C --> C1[Worker 1]
     C --> C2[Worker 2]
 ```
 
 The API defaults to direct PostgreSQL writes; after deploying Kafka, enable it with
-`.\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka`. Citus currently supports
-direct API writes; the Kafka writer still targets the baseline database.
+`.\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka`. The Citus setup also
+supports Kafka ingestion through a separate [mode switch](docs/engineering-notes.md#phase-4-sharding-with-citus).
 See the [Kafka](docs/engineering-notes.md#phase-2-kafka) and
 [Citus](docs/engineering-notes.md#phase-4-sharding-with-citus) notes.
 
@@ -121,9 +122,9 @@ and Spark resumed from its checkpoint to ingest a new batch. A dashboard shows t
 
 ## Phase 4: Citus sharding
 
-The Citus setup distributes pings by vehicle ID across a coordinator and two workers. A local
-migration, direct API writes, duplicate handling, and guarded rollback were verified; Kafka writer
-integration with Citus and Citus load testing remain future work.
+The Citus setup distributes pings by vehicle ID across a coordinator and two workers. Local checks
+verified migration, direct writes, Kafka-to-Citus writes, duplicate handling, and guarded rollback.
+A small load-test smoke check passed; higher-rate Citus performance testing remains.
 [Citus details](docs/engineering-notes.md#phase-4-sharding-with-citus).
 
 ## Limitations

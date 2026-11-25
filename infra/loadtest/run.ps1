@@ -50,9 +50,32 @@ function Get-CpuSeconds([string]$pod) {
 
 function Get-PingCount {
     $sql = 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM pings"'
-    $count = $sql | & $kubectl -n $namespace exec -i postgres-0 -- sh
+    $count = $sql | & $kubectl -n $namespace exec -i $dbQueryPod -- sh
     if ($LASTEXITCODE -ne 0) { throw 'Could not count stored pings.' }
     return [int64]("$count".Trim())
+}
+
+function Get-DatabaseCpuSeconds {
+    $total = 0.0
+    foreach ($pod in $dbPods) {
+        $total += Get-CpuSeconds $pod
+    }
+    return $total
+}
+
+$apiDeploymentJson = & $kubectl -n $namespace get deployment geopulse-api -o json
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the API database configuration.' }
+$apiDeployment = $apiDeploymentJson | ConvertFrom-Json
+$apiContainer = $apiDeployment.spec.template.spec.containers | Where-Object { $_.name -eq 'api' }
+$databaseSecret = ($apiContainer.env | Where-Object { $_.name -eq 'DATABASE_URL' }).valueFrom.secretKeyRef.name
+if ($databaseSecret -eq 'geopulse-database') {
+    $dbQueryPod = 'postgres-0'
+    $dbPods = @('postgres-0')
+} elseif ($databaseSecret -eq 'geopulse-citus-database') {
+    $dbQueryPod = 'geopulse-citus-coordinator-0'
+    $dbPods = @('geopulse-citus-coordinator-0', 'geopulse-citus-workers-0', 'geopulse-citus-workers-1')
+} else {
+    throw 'The API is not using a recognized PostgreSQL or Citus database secret.'
 }
 
 $apiPod = Get-PodName 'app=geopulse-api'
@@ -63,6 +86,7 @@ foreach ($rate in $Rates) {
 
     $countBefore = Get-PingCount
     $testRunId = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    Write-Host "Load test run ID: $testRunId"
 
     $job = @"
 apiVersion: batch/v1
@@ -112,7 +136,7 @@ spec:
     }
 
     $apiCpuBefore = Get-CpuSeconds $apiPod
-    $dbCpuBefore = Get-CpuSeconds 'postgres-0'
+    $dbCpuBefore = Get-DatabaseCpuSeconds
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
 
     $finished = $false
@@ -124,7 +148,7 @@ spec:
     }
     $clock.Stop()
     $apiCpuAfter = Get-CpuSeconds $apiPod
-    $dbCpuAfter = Get-CpuSeconds 'postgres-0'
+    $dbCpuAfter = Get-DatabaseCpuSeconds
     if (-not $finished) { throw "The load job for rate $rate did not finish." }
 
     $log = & $kubectl -n $namespace logs "job/$jobName"

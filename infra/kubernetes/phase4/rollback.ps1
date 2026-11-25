@@ -18,9 +18,13 @@ if ($LASTEXITCODE -ne 0) {
 $deployment = $deploymentJson | ConvertFrom-Json
 $api = $deployment.spec.template.spec.containers | Where-Object { $_.name -eq 'api' }
 $databaseSecret = ($api.env | Where-Object { $_.name -eq 'DATABASE_URL' }).valueFrom.secretKeyRef.name
+$ingestionMode = ($api.env | Where-Object { $_.name -eq 'PING_INGESTION_MODE' }).value
 $replicas = [int]$deployment.spec.replicas
 if ($databaseSecret -ne 'geopulse-citus-database') {
     throw 'The API is not configured to use Citus; refusing rollback.'
+}
+if ($ingestionMode -ne 'postgres') {
+    throw 'Return the Citus API to direct PostgreSQL ingestion before rolling back.'
 }
 $writer = & kubectl -n geopulse get deployment geopulse-kafka-writer --ignore-not-found -o name
 if ($LASTEXITCODE -ne 0 -or $writer) {

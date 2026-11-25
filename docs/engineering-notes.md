@@ -341,14 +341,15 @@ The API also serves a small live scoreboard at `/dashboard`. It uses the
 coordinates you enter to select an H3 area, then shows that area's vehicle
 count and average speed for the latest completed UTC minute. It refreshes every
 minute. After Phase 3 is deployed, rebuild/redeploy the API with the same
-ingestion mode you want to keep. For Kafka ingestion:
+ingestion mode you want to keep. For Kafka ingestion with the baseline database:
 
 ```powershell
 .\infra\kubernetes\phase1\deploy.ps1 -IngestionMode kafka
 ```
 
-For the PostgreSQL baseline, run the same script without the parameter. Then
-forward its service:
+For the PostgreSQL baseline, run the same script without the parameter. If the
+API already uses Citus, follow the [Citus mode instructions](#phase-4-sharding-with-citus)
+instead. Then forward its service:
 
 ```powershell
 kubectl -n geopulse port-forward service/geopulse-api 8000:8000
@@ -523,12 +524,40 @@ cut over; there is no automated merge or reverse migration. To provision and
 migrate Citus while keeping the API on the original PostgreSQL database, use
 `-SkipApiCutover`.
 
-The script requires direct PostgreSQL ingestion and no Kafka writer deployment.
+The migration script requires direct PostgreSQL ingestion and no Kafka writer deployment.
 Stop any other clients writing to either database before migration or rollback,
 and keep them stopped until the switch completes; the scripts cannot quiesce
-external clients. Kafka mode still writes to the original PostgreSQL database,
-not Citus. The Phase 1 deployment script refuses to switch away from Citus;
-use the guarded rollback first.
+external clients. The Phase 1 deployment script refuses to switch away from
+Citus; use the guarded rollback first.
+
+After Citus cutover, enable Kafka ingestion with:
+
+```powershell
+.\infra\kubernetes\phase4\kafka-mode.ps1 -Mode kafka
+```
+
+This builds the API/writer image, starts a writer targeting Citus with the
+existing `geopulse-ping-writer` group, and switches the API to Kafka. Its
+consumer resumes at the group's committed offsets; retained pending messages
+will be written to Citus. Ensure there are no other writers using this group.
+The Phase 1 Kafka command instead deploys a writer for the baseline database
+and cannot be used while the API points at Citus.
+
+To return to direct Citus writes, stop all other producers of `pings` and all
+other members of the writer group, then run:
+
+```powershell
+.\infra\kubernetes\phase4\kafka-mode.ps1 -Mode postgres
+```
+
+The script pauses the API, waits until the writer's committed offsets reach the
+ends of all partitions, stops the writer, and restores direct ingestion. It
+refuses missing or out-of-range offsets when earlier data may have expired.
+If draining fails, it restarts the previous API mode; after writer shutdown
+begins, failures require manual inspection. The check cannot stop external
+producers or consumers and cannot recover messages already lost to retention.
+Do not roll back to the baseline until the Kafka writer has been drained and
+stopped. Rollback itself refuses Kafka API mode.
 
 For isolated Kafka tests, the API and writer also accept `KAFKA_TOPIC`; both
 default to `pings` and must use the same topic. The writer still sends invalid
@@ -565,8 +594,20 @@ returning the same ID. A rollback with an extra Citus ping was refused and the
 API recovered on Citus; after removing that isolated ping, rollback succeeded.
 An extra baseline ping also caused the migration-marker check to refuse reuse.
 After cleaning up that test ping, cutover to Citus succeeded again. These checks
-do not establish performance, availability under worker failure, or Kafka-to-
-Citus integration.
+do not establish performance or availability under worker failure.
+
+An isolated Kafka topic and consumer group then exercised API -> Kafka ->
+Citus: two acknowledged retries produced one stored row, and the writer's
+committed offset reached the end. The temporary topic, pods, row and group were
+removed. A separate pending-message test confirmed that the drain check times
+out rather than reporting success. The Kafka/Citus mode switch and return to
+direct Citus mode were also exercised with the normal group already drained.
+
+The load-test runner counts rows in the database selected by the API and sums
+coordinator and worker CPU for Citus. A 5-second smoke run at a target of
+5 pings/s accepted and stored 26 requests with no failed or dropped requests;
+its uniquely identified rows were removed afterward. This validates the
+runner's Citus path, not Citus capacity or Kafka delivery at higher rates.
 
 ## Set up on Windows
 
