@@ -530,6 +530,12 @@ external clients. Kafka mode still writes to the original PostgreSQL database,
 not Citus. The Phase 1 deployment script refuses to switch away from Citus;
 use the guarded rollback first.
 
+For isolated Kafka tests, the API and writer also accept `KAFKA_TOPIC`; both
+default to `pings` and must use the same topic. The writer still sends invalid
+messages to the shared `pings-dlq`, so use valid test messages when isolation
+from the shared dead-letter topic is required. Set the Spark topic separately
+if it should consume that test stream.
+
 The API route
 `/api/v1/vehicles/{vehicle_id}/pings?limit=100` demonstrates a query that can
 be routed to one shard. `/api/v1/pings/count` is a cross-shard query.

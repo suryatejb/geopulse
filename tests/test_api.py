@@ -305,10 +305,15 @@ def test_postgres_duplicate_sequence_returns_original_ping(
     asyncio.run(exercise_api())
 
 
+@pytest.mark.parametrize("topic", ["pings", "pings-isolated-test"])
 def test_kafka_mode_returns_success_only_after_publishing_ping(
-    monkeypatch,
+    monkeypatch, topic: str,
 ) -> None:
     monkeypatch.setenv("PING_INGESTION_MODE", "kafka")
+    if topic != "pings":
+        monkeypatch.setenv("KAFKA_TOPIC", topic)
+    else:
+        monkeypatch.delenv("KAFKA_TOPIC", raising=False)
     app = create_app()
     app.state.pool = FakePool()
     app.state.kafka_producer = FakeProducer()
@@ -346,7 +351,7 @@ def test_kafka_mode_returns_success_only_after_publishing_ping(
         assert "kafka_send;dur=" in response.headers["Server-Timing"]
         assert len(app.state.kafka_producer.messages) == 1
         message = app.state.kafka_producer.messages[0]
-        assert message["topic"] == "pings"
+        assert message["topic"] == topic
         assert message["key"] == b"vehicle-00042"
         payload = json.loads(message["value"])
         assert payload["sequence_number"] == 7

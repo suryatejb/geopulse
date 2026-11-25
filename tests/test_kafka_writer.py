@@ -161,6 +161,34 @@ def test_writer_publishes_original_record_before_committing(
     consumer.commit.assert_awaited_once_with({TopicPartition("pings", 2): 18})
 
 
+@pytest.mark.parametrize("topic", ["pings", "pings-isolated-test"])
+def test_writer_subscribes_to_configured_topic(
+    monkeypatch: pytest.MonkeyPatch, topic: str
+) -> None:
+    consumer = MagicMock()
+    consumer.start = AsyncMock()
+    consumer.stop = AsyncMock()
+
+    consumer.__aiter__.return_value = []
+    producer = MagicMock()
+    producer.start = AsyncMock()
+    producer.stop = AsyncMock()
+    consumer_factory = MagicMock(return_value=consumer)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test")
+    if topic == "pings":
+        monkeypatch.delenv("KAFKA_TOPIC", raising=False)
+    else:
+        monkeypatch.setenv("KAFKA_TOPIC", topic)
+    monkeypatch.setattr("app.kafka_writer.AIOKafkaConsumer", consumer_factory)
+    monkeypatch.setattr("app.kafka_writer.AIOKafkaProducer", lambda **kwargs: producer)
+    monkeypatch.setattr("app.kafka_writer.ConnectionPool", lambda **kwargs: MagicMock())
+    monkeypatch.setattr("app.kafka_writer.initialize_database", lambda pool: None)
+
+    asyncio.run(run_writer())
+
+    assert consumer_factory.call_args.args == (topic,)
+
+
 def test_save_ping_rejects_missing_sequence_number() -> None:
     ping = parse_ping(
         json.dumps(

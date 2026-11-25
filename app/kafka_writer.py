@@ -170,7 +170,7 @@ async def run_writer() -> None:
         "geopulse-kafka-bootstrap.kafka.svc:9092",
     )
     consumer = AIOKafkaConsumer(
-        "pings",
+        os.getenv("KAFKA_TOPIC", "pings"),
         bootstrap_servers=bootstrap_servers,
         group_id=os.getenv("KAFKA_GROUP_ID", "geopulse-ping-writer"),
         enable_auto_commit=False,

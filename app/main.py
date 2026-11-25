@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
     ingestion_mode = os.getenv("PING_INGESTION_MODE", "postgres").strip().lower()
     if ingestion_mode not in {"postgres", "kafka"}:
         raise RuntimeError("PING_INGESTION_MODE must be 'postgres' or 'kafka'.")
+    kafka_topic = os.getenv("KAFKA_TOPIC", "pings")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -209,7 +210,7 @@ def create_app() -> FastAPI:
             try:
                 await asyncio.wait_for(
                     request.app.state.kafka_producer.send_and_wait(
-                        "pings",
+                        kafka_topic,
                         key=ping.vehicle_id.encode("utf-8"),
                         value=json.dumps(
                             kafka_ping,
